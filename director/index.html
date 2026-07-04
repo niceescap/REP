@@ -53,71 +53,30 @@
 <!-- WORKSPACE -->
 <div class="workspace">
 
-  <!-- LEFT: project meta -->
-  <div class="panel-left">
-    <div class="panel-section">
-      <div class="panel-section-title">Informations</div>
-      <div class="form-field">
-        <label class="form-label">Description</label>
-        <textarea class="form-input form-textarea" id="projectDesc" placeholder="Contexte de l'événement..."></textarea>
-      </div>
-      <div class="form-field">
-        <label class="form-label">Lieu</label>
-        <input class="form-input" type="text" id="projectLocation" placeholder="Paris, salle A">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Date</label>
-        <input class="form-input" type="date" id="projectDate" value="2025-06-14">
+  <!-- PREVIEW AREA: zone de détail en haut, pensée comme la fenêtre de preview CapCut.
+       Le JavaScript y injecte le plan sélectionné avec openDetail(). -->
+  <section class="preview-area" id="detailPanel" aria-label="Aperçu du plan sélectionné">
+    <div class="preview-empty" id="previewEmpty">
+      <div class="preview-empty-icon">🎬</div>
+      <div>
+        <strong>Sélectionnez un plan</strong>
+        <span>Touchez un bloc dans la timeline pour afficher et modifier ses détails ici.</span>
       </div>
     </div>
-
-    <div class="panel-section">
-      <div class="panel-section-title">Ajouter un plan</div>
-      <div class="form-field">
-        <label class="form-label">Type</label>
-        <div class="type-select" id="typeSelect">
-          <button class="type-opt sel" data-type="ouverture" style="--tc:#4DA6FF">Ouverture</button>
-          <button class="type-opt" data-type="interview" style="--tc:#FF5E3A">Interview</button>
-          <button class="type-opt" data-type="broll" style="--tc:#A8FF47">B-roll</button>
-          <button class="type-opt" data-type="transition" style="--tc:#C47FFF">Transition</button>
-          <button class="type-opt" data-type="cloture" style="--tc:#FFB830">Clôture</button>
-        </div>
-      </div>
-      <div class="form-field">
-        <label class="form-label">Intitulé du plan</label>
-        <input class="form-input" id="newBlockName" type="text" placeholder="ex. Introduction speakers">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Description attendue</label>
-        <textarea class="form-input form-textarea" id="newBlockDesc" placeholder="Ce que le cadreur doit capturer..."></textarea>
-      </div>
-      <div class="form-field">
-        <label class="form-label">Durée estimée (min)</label>
-        <input class="form-input" id="newBlockDur" type="number" value="5" min="1">
-      </div>
-      <button class="add-block-btn" id="addBlockBtn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        Ajouter à la timeline
-      </button>
+    <div class="detail-header" id="detailHeader" hidden>
+      <span class="detail-type-badge" id="detailBadge">—</span>
+      <button class="detail-close" id="detailClose" aria-label="Fermer le détail">✕</button>
     </div>
+    <div class="detail-body" id="detailBody"><!-- rempli dynamiquement --></div>
+  </section>
 
-    <div class="panel-section" style="flex:1">
-      <div class="panel-section-title">Pré-script Markdown</div>
-      <div style="font-size:11px;color:var(--muted);line-height:1.6">
-        Importez un fichier <code style="color:var(--accent);background:var(--surface3);padding:1px 4px;border-radius:3px">.md</code> pour générer automatiquement les blocs de la timeline à partir de vos titres de niveaux 2 (<code style="color:var(--muted)"># ## ###</code>).
-      </div>
-      <input type="file" id="mdFileInput" accept=".md,.txt" style="display:none">
-    </div>
-  </div>
-
-  <!-- MAIN: timeline -->
-  <div class="panel-main">
-    <!-- ruler -->
+  <!-- MAIN: timeline au centre. Le scroll horizontal est conservé pour naviguer
+       dans les plans comme dans une app de montage mobile. -->
+  <main class="panel-main">
     <div class="ruler">
       <canvas class="ruler-canvas" id="rulerCanvas"></canvas>
     </div>
 
-    <!-- timeline scroll -->
     <div class="timeline-scroll" id="timelineScroll">
       <div class="timeline-track" id="timelineTrack">
         <div class="timeline-empty" id="emptyState">
@@ -131,32 +90,66 @@
         </div>
       </div>
     </div>
+  </main>
 
-    <!-- timeline controls -->
-    <div class="timeline-controls">
-      <span class="tc-label">Zoom</span>
-      <div class="tc-zoom">
-        <button id="zoomOut">−</button>
-        <button id="zoomIn">+</button>
+  <!-- TOOLS BAR: barre du bas mobile-first.
+       Elle remplace les anciennes colonnes gauche/droite : formulaire compact,
+       import Markdown, zoom et compteurs de timeline. -->
+  <section class="tools-bar" aria-label="Outils de timeline">
+    <details class="tool-card project-tool">
+      <summary>Infos projet</summary>
+      <div class="tool-grid compact-grid">
+        <div class="form-field">
+          <label class="form-label">Description</label>
+          <textarea class="form-input form-textarea" id="projectDesc" placeholder="Contexte de l'événement..."></textarea>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Lieu</label>
+          <input class="form-input" type="text" id="projectLocation" placeholder="Paris, salle A">
+        </div>
+        <div class="form-field">
+          <label class="form-label">Date</label>
+          <input class="form-input" type="date" id="projectDate" value="2025-06-14">
+        </div>
       </div>
-      <span class="tc-label" id="zoomLabel" style="font-family:var(--mono);font-size:11px;color:var(--muted)">100%</span>
-      <div style="flex:1"></div>
-      <div class="tc-total">
-        Plans : <span id="blockCount">0</span> &nbsp;|&nbsp; Pourvus : <span id="coverageCount" style="color:#FFB830">0</span> &nbsp;|&nbsp; Planifié : <span id="plannedTotal">0 min</span> &nbsp;|&nbsp; Total : <span id="totalDisplay">90 min</span>
-      </div>
-    </div>
-  </div>
+    </details>
 
-  <!-- RIGHT: detail panel -->
-  <div class="panel-right" id="detailPanel">
-    <div class="detail-header" id="detailHeader">
-      <span class="detail-type-badge" id="detailBadge">—</span>
-      <button class="detail-close" id="detailClose">✕</button>
+    <div class="tool-card add-tool">
+      <div class="tool-card-title">Ajouter un plan</div>
+      <div class="type-select" id="typeSelect">
+        <button class="type-opt sel" data-type="ouverture" style="--tc:#4DA6FF">Ouverture</button>
+        <button class="type-opt" data-type="interview" style="--tc:#FF5E3A">Interview</button>
+        <button class="type-opt" data-type="broll" style="--tc:#A8FF47">B-roll</button>
+        <button class="type-opt" data-type="transition" style="--tc:#C47FFF">Transition</button>
+        <button class="type-opt" data-type="cloture" style="--tc:#FFB830">Clôture</button>
+      </div>
+      <div class="add-plan-grid">
+        <input class="form-input" id="newBlockName" type="text" placeholder="Intitulé du plan">
+        <input class="form-input" id="newBlockDur" type="number" value="5" min="1" aria-label="Durée estimée en minutes">
+        <textarea class="form-input form-textarea" id="newBlockDesc" placeholder="Description attendue..."></textarea>
+        <button class="add-block-btn" id="addBlockBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Ajouter
+        </button>
+      </div>
     </div>
-    <div class="detail-body" id="detailBody">
-      <!-- filled dynamically -->
+
+    <div class="tool-card timeline-tool">
+      <div class="timeline-controls">
+        <button class="btn btn-ghost btn-sm" id="importMdBtn">Import MD</button>
+        <input type="file" id="mdFileInput" accept=".md,.txt" style="display:none">
+        <span class="tc-label">Zoom</span>
+        <div class="tc-zoom">
+          <button id="zoomOut">−</button>
+          <button id="zoomIn">+</button>
+        </div>
+        <span class="tc-label" id="zoomLabel" style="font-family:var(--mono);font-size:11px;color:var(--muted)">100%</span>
+        <div class="tc-total">
+          Plans : <span id="blockCount">0</span> · Pourvus : <span id="coverageCount" style="color:#FFB830">0</span> · Planifié : <span id="plannedTotal">0 min</span> · Total : <span id="totalDisplay">90 min</span>
+        </div>
+      </div>
     </div>
-  </div>
+  </section>
 </div>
 
 <!-- TOAST -->
