@@ -286,6 +286,21 @@ body {
 .block.pourvu .block-name { color: #A8FF47; }
 .block.pourvu .block-duration { color: #A8FF4799; }
 
+/* ── BLOC NON SAUVEGARDÉ (draft) ── */
+.block.dirty {
+  border-style: dashed;
+  border-color: #FFB83055;
+}
+.block.dirty::after {
+  content: '○';
+  position: absolute;
+  top: 3px;
+  right: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #FFB830;
+  line-height: 1;
+}
 /* section "pourvu" dans le detail panel */
 .pourvu-banner {
   display: flex;
@@ -339,6 +354,20 @@ body {
   font-family: var(--mono);
 }
 
+/* ── DRAFT BANNER (dans le panneau détail) ────────────────── */
+.draft-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in srgb, #FFB830 10%, transparent);
+  border: 1px solid #FFB83044;
+  border-radius: 7px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  font-size: 11px;
+  color: #FFB830;
+  line-height: 1.5;
+}
 /* resize handle */
 .block-resize {
   position: absolute;
@@ -494,8 +523,9 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  height: 68px;
+  gap: 8px;
+  min-height: 90px;
+  padding: 20px;
   border: 1px dashed var(--border);
   border-radius: 8px;
   color: var(--muted);
@@ -503,6 +533,7 @@ body {
   min-width: 400px;
 }
 .timeline-empty svg { opacity: .4; }
+.timeline-empty .btn { margin-top: 2px; }
 
 /* scrollbar main */
 .panel-left::-webkit-scrollbar,
@@ -582,6 +613,26 @@ body {
   margin-bottom: 18px;
   color: var(--fg);
 }
+/* ── MODAL HEADER (titre + ✕) ─────────────────────────────── */
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.modal-header .modal-title { margin-bottom: 0; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all .15s;
+}
+.modal-close:hover { background: var(--surface3); color: var(--text); }
 
 /* ── PROJECT LIST ────────────────────────────────────────── */
 .proj-item {
