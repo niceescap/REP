@@ -581,7 +581,7 @@ body {
   border-radius: 8px;
   color: var(--muted);
   font-size: 12px;
-  min-width: 400px;
+  min-width: min(100%, 400px);
 }
 .timeline-empty svg { opacity: .4; }
 .timeline-empty .btn { margin-top: 2px; }
