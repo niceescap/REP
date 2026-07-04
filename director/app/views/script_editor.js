@@ -712,11 +712,14 @@ document.getElementById('openProjectsBtn').addEventListener('click', loadProject
 
 // ── INITIALISATION ─────────────────────────────────────────────────────────
 (function init() {
-  if (!token) {
-    document.getElementById('loginModal').classList.add('open');
-  } else {
-    initDraftProject();
-  }
+  // Mode invité par défaut : on initialise toujours un brouillon,
+  // même sans token. La modale ne bloque plus — elle s'affiche juste
+  // au-dessus d'une interface déjà fonctionnelle.
+  initDraftProject();
   renderTimeline();
   updateSaveButton();
+
+  if (!token) {
+    document.getElementById('loginModal').classList.add('open');
+  }
 })();
