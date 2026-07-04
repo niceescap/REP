@@ -608,7 +608,15 @@ function refreshDetailDuration(dur) {
 
 function closeDetail() {
   activeBlockId = null;
+
+  // On remet la preview dans son état de repos : aucun plan sélectionné.
+  // Le contenu dynamique est vidé pour éviter de garder d'anciens listeners
+  // sur des champs qui ne sont plus visibles.
   document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('detailHeader').hidden = true;
+  document.getElementById('detailBody').innerHTML = '';
+  document.getElementById('previewEmpty').hidden = false;
+
   renderTimeline();
 }
 
