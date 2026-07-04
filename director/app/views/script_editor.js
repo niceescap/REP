@@ -565,8 +565,6 @@ function openDetail(id) {
     </div>
   `;
 
-  document.getElementById('detailPanel').classList.add('open');
-
   document.getElementById('det-name').addEventListener('input', e => {
     b.name = e.target.value;
     b._dirty = true;
