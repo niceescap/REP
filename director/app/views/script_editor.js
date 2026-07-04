@@ -497,17 +497,30 @@ function updateFooter() {
   }
 }
 
-// ── PANNEAU DE DÉTAIL ──────────────────────────────────────────────────────
+// ── PREVIEW / DÉTAIL DU PLAN ───────────────────────────────────────────────
+// Ancien fonctionnement : openDetail() ouvrait un panneau latéral droit.
+// Nouveau fonctionnement mobile-first : openDetail() remplit la zone .preview-area
+// placée au-dessus de la timeline, comme une fenêtre de prévisualisation CapCut.
 function openDetail(id) {
   activeBlockId = id;
   const b = blocks.find(x => x.id == id);
   if (!b) return;
 
+  const detailPanel = document.getElementById('detailPanel');
+  const detailHeader = document.getElementById('detailHeader');
+  const detailBody = document.getElementById('detailBody');
+  const previewEmpty = document.getElementById('previewEmpty');
+
+  // On masque l'état vide et on affiche l'en-tête du plan sélectionné.
+  previewEmpty.hidden = true;
+  detailHeader.hidden = false;
+  detailPanel.classList.add('open');
+
   const c = TYPE_COLORS[b.type];
   document.getElementById('detailBadge').textContent = TYPE_LABELS[b.type] || b.type;
   document.getElementById('detailBadge').style.setProperty('--dc', c);
 
-  document.getElementById('detailBody').innerHTML = `
+  detailBody.innerHTML = `
     ${b.pourvu ? `
     <div class="pourvu-banner">
       <div class="pourvu-check">✅</div>
