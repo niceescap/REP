@@ -230,9 +230,10 @@ body {
 .add-block-btn:hover { border-color: var(--accent); color: var(--accent); }
 .add-block-btn svg { flex-shrink: 0; }
 
-/* ── MAIN AREA ── */
+/* ── MAIN AREA : timeline centrale ── */
 .panel-main {
   flex: 1;
+  min-height: 120px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
