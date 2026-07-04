@@ -94,11 +94,24 @@ function logout() {
   localStorage.removeItem('rep_token');
   currentProject = null;
   blocks = [];
-  document.getElementById('loginModal').classList.add('open');
-  document.getElementById('projectModal').classList.remove('open');
   updateSaveButton();
   renderTimeline();
+  document.getElementById('loginModal').classList.add('open');
+  document.getElementById('projectModal').classList.remove('open');
 }
+
+function enterGuestMode() {
+  // Ferme la modale et initialise un brouillon sans token.
+  // Les appels API échoueront proprement car apiFetch gère les 401.
+  document.getElementById('loginModal').classList.remove('open');
+  document.getElementById('loginError').textContent = '';
+  showToast('Mode invité — vos plans restent en local');
+  initDraftProject();
+  renderTimeline();
+  updateSaveButton();
+}
+
+document.getElementById('guestBtn').addEventListener('click', enterGuestMode);
 
 document.getElementById('loginForm').addEventListener('submit', async e => {
   e.preventDefault();
