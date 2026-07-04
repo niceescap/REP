@@ -637,25 +637,40 @@ body {
   }
   .total-duration-label,
   .total-duration-unit,
-  #importMdBtn svg,
   #saveBtn svg,
   #openProjectsBtn svg { display: none; }
-  .preview-area { min-height: 135px; max-height: 32vh; }
-  .preview-area.open { min-height: 210px; }
-  .timeline-track { min-width: 520px; height: 72px; }
-  .timeline-empty { min-width: 320px; }
+
+  .preview-area { min-height: 100px; max-height: 28vh; }
+  .preview-area.open { min-height: 150px; }
+  .preview-empty { padding: 10px; font-size: 11px; }
+  .preview-empty strong { font-size: 12px; }
+  .preview-empty-icon { font-size: 22px; }
+
+  .timeline-track { min-width: min(100%, 320px); height: 58px; }
+  .timeline-empty { min-width: min(100%, 280px); padding: 14px; }
+  .block { padding: 4px 6px 3px; }
+  .block-name { font-size: 10px; }
+  .block-label { font-size: 9px; }
+  .block-duration { font-size: 9px; }
+
+  .tools-bar { max-height: 38vh; padding: 6px; gap: 6px; }
+  .add-plan-grid { gap: 6px; }
+
+  .detail-body { padding: 10px 12px; }
+  .detail-field { margin-bottom: 8px; }
 }
 
 @media (min-width: 900px) {
-  .preview-area { min-height: 190px; max-height: 36vh; }
+  .preview-area { min-height: 160px; max-height: 34vh; }
   .tools-bar {
     grid-template-columns: minmax(180px, .8fr) minmax(420px, 1.6fr) minmax(260px, 1fr);
     align-items: start;
-    max-height: 260px;
+    max-height: 240px;
   }
   .project-tool { min-height: 100%; }
   .compact-grid { grid-template-columns: 1fr; }
   .tc-total { flex-basis: auto; margin-left: auto; }
+  .timeline-track { min-width: min(100%, 600px); height: 72px; }
 }
 .type-opt:hover { border-color: var(--muted); color: var(--text); }
 .type-opt.sel { background: color-mix(in srgb, var(--tc) 18%, transparent); border-color: var(--tc); color: var(--tc); }
