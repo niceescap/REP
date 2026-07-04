@@ -286,6 +286,21 @@ body {
 .block.pourvu .block-name { color: #A8FF47; }
 .block.pourvu .block-duration { color: #A8FF4799; }
 
+/* ── BLOC NON SAUVEGARDÉ (draft) ── */
+.block.dirty {
+  border-style: dashed;
+  border-color: #FFB83055;
+}
+.block.dirty::after {
+  content: '○';
+  position: absolute;
+  top: 3px;
+  right: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #FFB830;
+  line-height: 1;
+}
 /* section "pourvu" dans le detail panel */
 .pourvu-banner {
   display: flex;
