@@ -134,6 +134,8 @@ async def upload_rush(
         "filename": filename,
         "project_uid": project_uid,
         "description": description,
+        "matched_plan": matched_block,
+        "score": matched_score,
     }
 
 
