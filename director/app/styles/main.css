@@ -270,7 +270,7 @@ body {
   display: flex;
   align-items: stretch;
   gap: 2px;
-  min-width: 600px;
+  min-width: min(100%, 600px);
   height: 68px;
   position: relative;
 }
