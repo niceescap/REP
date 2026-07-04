@@ -458,7 +458,7 @@ function setupResizeHandles() {
     };
 
     const doResize = (x) => {
-      const trackWidth = Math.max(600, 800 * zoom);
+      const trackWidth = Math.max(320, Math.min(window.innerWidth * 1.2, 800 * zoom));
       const pxPerMin = trackWidth / totalDuration;
       const b = blocks.find(b => b.id == blockId);
       if (!b) return;
