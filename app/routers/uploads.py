@@ -115,13 +115,17 @@ async def upload_rush(
     match_result = match_rush_to_plan(description, blocks_list, use_llm=True)
     if match_result:
         matched_block_id, score = match_result
-        # Mettre à jour le rush avec l'identifiant du plan trouvé
+        # Mettre à jour le rush avec l'identifiant du plan trouvé et le score de confiance
         db.execute(
             "UPDATE rushes SET matched_plan = ?, score = ? WHERE id = ?",
-            (str(matched_block_id), rush_id)
+            (str(matched_block_id), score, rush_id)
         )
         db.commit()
-        # Note : on pourrait aussi stocker le score dans une colonne dédiée
+        matched_block = matched_block_id
+        matched_score = score
+    else:
+        matched_block = None
+        matched_score = None
     # ── Fin matching ───────────────────────────────────────────────────────
 
     # Retourner la réponse (dans tous les cas, même si aucun plan n'a été matché)
@@ -130,6 +134,8 @@ async def upload_rush(
         "filename": filename,
         "project_uid": project_uid,
         "description": description,
+        "matched_plan": matched_block,
+        "score": matched_score,
     }
 
 
@@ -160,7 +166,7 @@ def list_rushes(
     # Récupérer tous les rushs liés au projet
     rows = db.execute(
         """SELECT id, filename, mimetype, description, metadata,
-                  matched_plan, uploaded_at
+                  matched_plan, score, uploaded_at
            FROM rushes WHERE project_uid = ?""",
         (project_uid,)
     ).fetchall()
