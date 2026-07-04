@@ -1,29 +1,26 @@
 // =============================================================================
 // Rush Event Pilot — Timeline Editor (script_editor.js)
 // =============================================================================
-// Ce script gère toute l'interface du réalisateur :
-//   - Authentification JWT
-//   - Chargement / création de projets
-//   - Gestion des blocs (plans) synchronisée avec l'API
-//   - Affichage de la timeline avec statut "pourvu" (rushs matchés)
+// Mode "bac à sable" : la timeline est éditable immédiatement dans un projet
+// implicite non sauvegardé (comme un document Word sans titre).
+// La persistance (création projet + blocs) se fait en un clic.
 // =============================================================================
 
 // ── CONFIGURATION ──────────────────────────────────────────────────────────
-const API = '';  // même origine, pas de préfixe d'hôte
+const API = '';
 
 // ── ÉTAT GLOBAL ────────────────────────────────────────────────────────────
 let token = localStorage.getItem('rep_token') || null;
-let currentProject = null;          // { project_uid, label, prescript, ... }
-let blocks = [];                    // liste des plans affichés dans la timeline
-let activeBlockId = null;           // identifiant du bloc sélectionné (panneau de droite)
-let totalDuration = 90;             // durée totale du projet en minutes
-let zoom = 1;                       // facteur de zoom de la timeline
-let selectedType = 'ouverture';     // type de plan sélectionné par défaut dans le formulaire
+let currentProject = null;          // { _draft:true, label, project_uid:null } ou { project_uid, label }
+let blocks = [];                    // liste des plans, chaque bloc a { id, type, name, desc, duration, keywords, pourvu, _dirty }
+let activeBlockId = null;
+let totalDuration = 90;
+let zoom = 1;
+let selectedType = 'ouverture';
 
-// Correspondance type → couleur / libellé (utilisé dans le CSS et l'affichage)
 const TYPE_COLORS = {
-  ouverture:  '#4DA6FF', interview: '#FF5E3A',
-  broll:      '#A8FF47', transition: '#C47FFF', cloture: '#FFB830',
+  ouverture: '#4DA6FF', interview: '#FF5E3A',
+  broll: '#A8FF47', transition: '#C47FFF', cloture: '#FFB830',
 };
 const TYPE_LABELS = {
   ouverture: 'Ouverture', interview: 'Interview',
@@ -32,15 +29,13 @@ const TYPE_LABELS = {
 
 // ── UTILITAIRES ────────────────────────────────────────────────────────────
 
-/** Formatte un nombre de minutes en chaîne lisible (ex: 1h30, 5 min) */
 function fmtMin(m) {
   const h = Math.floor(m / 60);
   const mn = Math.round(m % 60);
-  if (h > 0) return `${h}h${mn.toString().padStart(2,'0')}`;
+  if (h > 0) return `${h}h${mn.toString().padStart(2, '0')}`;
   return `${mn} min`;
 }
 
-/** Affiche un message temporaire en bas de l'écran (toast) */
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -48,7 +43,6 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 2200);
 }
 
-/** Construit les headers HTTP pour les requêtes authentifiées */
 function authHeaders() {
   return {
     'Authorization': `Bearer ${token}`,
@@ -56,18 +50,12 @@ function authHeaders() {
   };
 }
 
-/**
- * Effectue une requête vers l'API et gère les erreurs automatiquement.
- * @param {string} path - Chemin absolu (ex: '/api/projects')
- * @param {object} opts - Options fetch supplémentaires
- * @returns {object|null} Données JSON ou null en cas d'échec
- */
 async function apiFetch(path, opts = {}) {
   const res = await fetch(API + path, {
     ...opts,
     headers: { ...authHeaders(), ...(opts.headers || {}) }
   });
-  if (res.status === 401) {          // token expiré ou invalide → déconnexion
+  if (res.status === 401) {
     logout();
     return null;
   }
@@ -79,9 +67,28 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
+/** Met à jour le libellé et l'icône du bouton principal selon l'état */
+function updateSaveButton() {
+  const btn = document.getElementById('saveBtn');
+  if (!currentProject || currentProject._draft) {
+    btn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/>
+        <polyline points="7 3 7 8 15 8"/>
+      </svg> Créer projet`;
+  } else {
+    btn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/>
+        <polyline points="7 3 7 8 15 8"/>
+      </svg> Enregistrer`;
+  }
+}
+
 // ── AUTHENTIFICATION ───────────────────────────────────────────────────────
 
-/** Déconnecte l'utilisateur, efface le token et affiche la modale de connexion */
 function logout() {
   token = null;
   localStorage.removeItem('rep_token');
@@ -89,9 +96,10 @@ function logout() {
   blocks = [];
   document.getElementById('loginModal').classList.add('open');
   document.getElementById('projectModal').classList.remove('open');
+  updateSaveButton();
+  renderTimeline();
 }
 
-/** Gère la soumission du formulaire de connexion */
 document.getElementById('loginForm').addEventListener('submit', async e => {
   e.preventDefault();
   const username = document.getElementById('loginUser').value.trim();
@@ -110,21 +118,30 @@ document.getElementById('loginForm').addEventListener('submit', async e => {
   token = data.access_token;
   localStorage.setItem('rep_token', token);
   document.getElementById('loginModal').classList.remove('open');
-  loadProjectList();   // une fois connecté, affiche la liste des projets
+  initDraftProject();
+  renderTimeline();
+  showToast('Connecté — commencez à construire votre timeline');
 });
+
+// ── PROJET DRAFT (bac à sable) ─────────────────────────────────────────────
+
+/** Initialise un projet non sauvegardé (mode brouillon). */
+function initDraftProject() {
+  currentProject = { _draft: true, label: 'Sans titre', project_uid: null };
+  blocks = [];
+  document.getElementById('projectName').value = 'Sans titre';
+  updateSaveButton();
+}
 
 // ── GESTION DES PROJETS ────────────────────────────────────────────────────
 
-/**
- * Charge la liste des projets de l'utilisateur et ouvre la modale de sélection.
- */
 async function loadProjectList() {
   const data = await apiFetch('/api/projects');
   if (!data) return;
   const list = document.getElementById('projectList');
   list.innerHTML = '';
   if (data.length === 0) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:13px">Aucun projet — créez-en un ci-dessous.</div>';
+    list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:8px 0">Aucun projet — créez-en un ci-dessous.</div>';
   }
   data.forEach(p => {
     const el = document.createElement('div');
@@ -139,94 +156,121 @@ async function loadProjectList() {
   document.getElementById('projectModal').classList.add('open');
 }
 
-/** Ferme la modale des projets */
 function hideProjectModal() {
   document.getElementById('projectModal').classList.remove('open');
 }
 
-/**
- * Ouvre un projet : met à jour l'état, change le titre, et charge ses blocs.
- * @param {object} p - Objet projet (project_uid, label, ...)
- */
+/** Ouvre un projet existant (remplace le brouillon en cours). */
 async function openProject(p) {
-  currentProject = p;
+  const hasDirtyBlocks = blocks.some(b => b._dirty);
+  if (hasDirtyBlocks && currentProject && currentProject._draft) {
+    if (!confirm('Vous avez des modifications non sauvegardées. Les abandonner ?')) return;
+  }
+  currentProject = { project_uid: p.project_uid, label: p.label, _draft: false };
   hideProjectModal();
   document.getElementById('projectName').value = p.label;
-  // Transforme le bouton "Créer projet" en indicateur "Projet actif"
-  document.getElementById('saveBtn').innerHTML = `
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-    </svg> Projet actif`;
+  updateSaveButton();
   await loadBlocks();
   showToast(`Projet "${p.label}" chargé`);
 }
 
-// ── CRÉATION D'UN PROJET (bouton principal) ────────────────────────────────
+// ── BOUTON PRINCIPAL : CRÉER / ENREGISTRER ─────────────────────────────────
+
 document.getElementById('saveBtn').addEventListener('click', async () => {
-  if (currentProject) {
-    showToast('Projet déjà actif — modifiez les blocs directement');
-    return;
-  }
   const label = document.getElementById('projectName').value.trim();
   if (!label) { showToast('⚠ Donnez un nom au projet'); return; }
-  const data = await apiFetch('/api/projects', {
-    method: 'POST',
-    body: JSON.stringify({ label, prescript: '' })
-  });
-  if (!data) return;
-  await openProject(data);
-  showToast(`Projet "${data.label}" créé ✓`);
+
+  // Cas 1 : projet brouillon → création groupée (projet + blocs)
+  if (currentProject && currentProject._draft) {
+    const data = await apiFetch('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({ label })
+    });
+    if (!data) return;
+
+    currentProject = { project_uid: data.project_uid, label: data.label, _draft: false };
+    document.getElementById('projectName').value = data.label;
+    updateSaveButton();
+
+    // Envoyer tous les blocs un par un
+    let saved = 0;
+    for (const b of blocks) {
+      const payload = { type: b.type, name: b.name, description: b.desc, duration: b.duration, keywords: b.keywords };
+      const blockData = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      if (blockData) {
+        b.id = blockData.id;
+        b._dirty = false;
+        saved++;
+      }
+    }
+    showToast(`Projet "${label}" créé ✓ · ${saved} plan(s) sauvegardé(s)`);
+    renderTimeline();
+    return;
+  }
+
+  // Cas 2 : projet connecté → sauvegarde des blocs modifiés
+  if (currentProject && !currentProject._draft) {
+    let saved = 0;
+    for (const b of blocks.filter(b => b._dirty)) {
+      await saveBlockToAPI(b);
+      b._dirty = false;
+      saved++;
+    }
+    showToast(saved > 0 ? `${saved} plan(s) sauvegardé(s) ✓` : 'Aucune modification');
+    return;
+  }
 });
 
-// ── CRÉATION D'UN PROJET DEPUIS LA MODALE ──────────────────────────────────
+// ── CRÉATION DE PROJET DEPUIS LA MODALE ────────────────────────────────────
 document.getElementById('createProjectBtn').addEventListener('click', async () => {
   const label = document.getElementById('newProjectLabel').value.trim();
   if (!label) { showToast('⚠ Donnez un nom'); return; }
   const data = await apiFetch('/api/projects', {
     method: 'POST',
-    body: JSON.stringify({ label, prescript: '' })
+    body: JSON.stringify({ label })
   });
   if (!data) return;
   await openProject(data);
   showToast(`Projet "${data.label}" créé ✓`);
 });
 
-// ── DÉCONNEXION DEPUIS LA MODALE ──────────────────────────────────────────
+// ── FERMETURE MODALE PROJETS ───────────────────────────────────────────────
+document.getElementById('projectModalClose').addEventListener('click', hideProjectModal);
+document.getElementById('projectModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('projectModal')) hideProjectModal();
+});
+
+// ── DÉCONNEXION ────────────────────────────────────────────────────────────
 document.getElementById('modalLogoutBtn').addEventListener('click', () => {
   hideProjectModal();
   logout();
 });
 
-// ── GESTION DES BLOCS (PLANS) ──────────────────────────────────────────────
+// ── GESTION DES BLOCS ──────────────────────────────────────────────────────
 
-/**
- * Charge les blocs du projet courant depuis l'API.
- * Puis enrichit avec les rushs pour déterminer le statut "pourvu".
- */
 async function loadBlocks() {
-  if (!currentProject) return;
+  if (!currentProject || currentProject._draft) return;
   const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`);
   if (!data) return;
-  // Adaptation des champs de l'API vers le modèle interne
   blocks = data.map(b => ({
     id: b.id,
     type: b.type,
     name: b.name,
     desc: b.description,
     duration: b.duration,
-    keywords: Array.isArray(b.keywords) ? b.keywords : (b.keywords || '').split(',').map(s=>s.trim()),
-    pourvu: null
+    keywords: Array.isArray(b.keywords) ? b.keywords : (b.keywords || '').split(',').map(s => s.trim()),
+    pourvu: null,
+    _dirty: false
   }));
   await enrichBlocksWithRushes();
   renderTimeline();
 }
 
-/**
- * Interroge les rushs du projet et, pour chaque bloc, cherche si un rush y est matché.
- * Remplit alors le champ `pourvu` avec les infos du rush.
- */
 async function enrichBlocksWithRushes() {
-  if (!currentProject) return;
+  if (!currentProject || currentProject._draft) return;
   const rushes = await apiFetch(`/api/projects/${currentProject.project_uid}/rushes`);
   if (!rushes) return;
   blocks.forEach(b => {
@@ -236,12 +280,12 @@ async function enrichBlocksWithRushes() {
       try {
         const meta = JSON.parse(match.metadata || '{}');
         cadreur = meta.cadreur || cadreur;
-      } catch(e) {}
+      } catch (e) { }
       b.pourvu = {
         cadreur: cadreur,
         filename: match.filename,
-        date: match.uploaded_at ? match.uploaded_at.slice(0,10) : '',
-        heure: match.uploaded_at ? match.uploaded_at.slice(11,16) : '',
+        date: match.uploaded_at ? match.uploaded_at.slice(0, 10) : '',
+        heure: match.uploaded_at ? match.uploaded_at.slice(11, 16) : '',
         score: match.score || '?',
       };
     } else {
@@ -251,43 +295,37 @@ async function enrichBlocksWithRushes() {
 }
 
 // ── AJOUTER UN BLOC (formulaire de gauche) ─────────────────────────────────
-document.getElementById('addBlockBtn').addEventListener('click', async () => {
-  if (!currentProject) { showToast('⚠ Ouvrez ou créez un projet d\'abord'); return; }
+document.getElementById('addBlockBtn').addEventListener('click', () => {
+  if (!currentProject) { showToast('⚠ Aucun projet actif'); return; }
   const name = document.getElementById('newBlockName').value.trim();
   const desc = document.getElementById('newBlockDesc').value.trim();
-  const dur  = Math.max(1, parseInt(document.getElementById('newBlockDur').value) || 5);
-  const payload = {
+  const dur = Math.max(1, parseInt(document.getElementById('newBlockDur').value) || 5);
+
+  const newBlock = {
+    id: 'tmp_' + Date.now(),
     type: selectedType,
-    name: name,
-    description: desc,
+    name: name || 'Plan sans titre',
+    desc: desc,
     duration: dur,
-    keywords: []
+    keywords: [],
+    pourvu: null,
+    _dirty: true
   };
-  const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
-    method: 'POST',
-    body: JSON.stringify(payload)
-  });
-  if (!data) return;
-  // Ajoute le nouveau bloc dans l'état local
-  blocks.push({
-    id: data.id, type: data.type, name: data.name,
-    desc: data.description, duration: data.duration,
-    keywords: data.keywords, pourvu: null
-  });
-  // Réinitialise les champs du formulaire
+  blocks.push(newBlock);
   document.getElementById('newBlockName').value = '';
   document.getElementById('newBlockDesc').value = '';
   document.getElementById('newBlockDur').value = 5;
   renderTimeline();
-  showToast('Plan ajouté ✓');
+  showToast('Plan ajouté' + (currentProject._draft ? ' (non sauvegardé)' : ''));
 });
 
-/**
- * Sauvegarde les modifications d'un bloc vers l'API.
- * @param {object} b - Le bloc (issu de l'état `blocks`)
- */
+// ── BOUTON DANS L'ÉTAT VIDE ────────────────────────────────────────────────
+document.getElementById('emptyAddBlockBtn').addEventListener('click', () => {
+  document.getElementById('addBlockBtn').click();
+});
+
 async function saveBlockToAPI(b) {
-  if (!currentProject) return;
+  if (!currentProject || currentProject._draft) return;
   await apiFetch(`/api/projects/${currentProject.project_uid}/blocks/${b.id}`, {
     method: 'PUT',
     body: JSON.stringify({
@@ -300,27 +338,34 @@ async function saveBlockToAPI(b) {
   });
 }
 
-/**
- * Supprime un bloc via l'API et le retire de l'état local.
- * @param {number} id - Identifiant du bloc à supprimer
- */
 async function deleteBlock(id) {
   if (!currentProject) return;
-  await apiFetch(`/api/projects/${currentProject.project_uid}/blocks/${id}`, {
-    method: 'DELETE'
-  });
+  const b = blocks.find(x => x.id == id);
+
+  // Si brouillon ou ID temporaire → suppression locale uniquement
+  if (currentProject._draft || String(id).startsWith('tmp_')) {
+    blocks = blocks.filter(x => x.id != id);
+    closeDetail();
+    renderTimeline();
+    showToast('Plan supprimé');
+    return;
+  }
+
+  // Projet connecté → suppression API
+  await apiFetch(`/api/projects/${currentProject.project_uid}/blocks/${id}`, { method: 'DELETE' });
   blocks = blocks.filter(x => x.id != id);
   closeDetail();
   renderTimeline();
   showToast('Plan supprimé');
 }
 
-// ── RÈGLE GRADUÉE (RULER) ─────────────────────────────────────────────────
+// ── RÈGLE GRADUÉE ─────────────────────────────────────────────────────────
 function drawRuler() {
   const canvas = document.getElementById('rulerCanvas');
-  const track  = document.getElementById('timelineTrack');
+  const track = document.getElementById('timelineTrack');
   const W = track.scrollWidth || 600;
-  canvas.width = W; canvas.height = 28;
+  canvas.width = W;
+  canvas.height = 28;
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, W, 28);
   ctx.font = '9px JetBrains Mono, monospace';
@@ -328,8 +373,10 @@ function drawRuler() {
   const step = totalDuration <= 30 ? 1 : totalDuration <= 90 ? 5 : totalDuration <= 180 ? 10 : 15;
   for (let m = 0; m <= totalDuration; m += step) {
     const x = 16 + m * pxPerMin;
-    ctx.fillStyle = '#353545'; ctx.fillRect(x, 18, 1, 10);
-    ctx.fillStyle = '#6B6B85'; ctx.fillText(fmtMin(m), x + 2, 14);
+    ctx.fillStyle = '#353545';
+    ctx.fillRect(x, 18, 1, 10);
+    ctx.fillStyle = '#6B6B85';
+    ctx.fillText(fmtMin(m), x + 2, 14);
   }
 }
 
@@ -338,7 +385,7 @@ function renderTimeline() {
   const track = document.getElementById('timelineTrack');
   const empty = document.getElementById('emptyState');
   const trackWidth = Math.max(600, 800 * zoom);
-  // Supprime tous les blocs existants dans le DOM
+
   [...track.querySelectorAll('.block')].forEach(el => el.remove());
 
   if (blocks.length === 0) {
@@ -350,18 +397,17 @@ function renderTimeline() {
   }
   empty.style.display = 'none';
 
-  // Pour chaque bloc, on crée un élément HTML proportionnel à sa durée
   blocks.forEach(b => {
     const ratio = b.duration / (totalDuration || 1);
     const w = Math.max(70, Math.floor(ratio * trackWidth));
     const el = document.createElement('div');
-    el.className = `block type-${b.type}${b.pourvu ? ' pourvu' : ''}`;
+    el.className = `block type-${b.type}${b.pourvu ? ' pourvu' : ''}${b._dirty ? ' dirty' : ''}`;
     el.dataset.id = b.id;
     el.style.width = w + 'px';
     el.style.flexShrink = '0';
     if (b.id === activeBlockId) el.classList.add('active');
     el.innerHTML = `
-      <div class="block-label">${TYPE_LABELS[b.type] || b.type}</div>
+      <div class="block-label">${TYPE_LABELS[b.type] || b.type}${b._dirty ? ' ·' : ''}</div>
       <div class="block-name">${b.name || 'Plan sans titre'}</div>
       <div class="block-duration">${fmtMin(b.duration)}${b.pourvu ? ` · <span style="color:#A8FF47;font-size:9px">${b.pourvu.cadreur}</span>` : ''}</div>
       <div class="block-resize" data-id="${b.id}"></div>
@@ -378,7 +424,7 @@ function renderTimeline() {
   updateFooter();
 }
 
-// ── REDIMENSIONNEMENT DES BLOCS (poignées) ─────────────────────────────────
+// ── REDIMENSIONNEMENT ──────────────────────────────────────────────────────
 function setupResizeHandles() {
   document.querySelectorAll('.block-resize').forEach(handle => {
     let startX, startDur, blockId;
@@ -396,18 +442,25 @@ function setupResizeHandles() {
       const b = blocks.find(b => b.id == blockId);
       if (!b) return;
       b.duration = Math.max(1, Math.round(startDur + (x - startX) / pxPerMin));
+      b._dirty = true;
       renderTimeline();
       if (activeBlockId == blockId) refreshDetailDuration(b.duration);
     };
 
-    // Événements souris
+    const finalizeResize = () => {
+      const b = blocks.find(b => b.id == blockId);
+      // Sauvegarde auto en mode connecté
+      if (b && currentProject && !currentProject._draft) {
+        saveBlockToAPI(b).then(() => { b._dirty = false; renderTimeline(); });
+      }
+    };
+
     handle.addEventListener('mousedown', e => {
       e.stopPropagation();
       startResize(e.clientX, handle.dataset.id);
       const onMove = e => doResize(e.clientX);
       const onUp = () => {
-        const b = blocks.find(b => b.id == blockId);
-        if (b) saveBlockToAPI(b);   // sauvegarde après le redimensionnement
+        finalizeResize();
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
       };
@@ -415,17 +468,12 @@ function setupResizeHandles() {
       document.addEventListener('mouseup', onUp);
     });
 
-    // Événements tactiles
     handle.addEventListener('touchstart', e => {
       e.stopPropagation();
       startResize(e.touches[0].clientX, handle.dataset.id);
-      const onMove = e => {
-        e.preventDefault();
-        doResize(e.touches[0].clientX);
-      };
+      const onMove = e => { e.preventDefault(); doResize(e.touches[0].clientX); };
       const onEnd = () => {
-        const b = blocks.find(b => b.id == blockId);
-        if (b) saveBlockToAPI(b);
+        finalizeResize();
         document.removeEventListener('touchmove', onMove);
         document.removeEventListener('touchend', onEnd);
       };
@@ -435,7 +483,7 @@ function setupResizeHandles() {
   });
 }
 
-// ── PIED DE TIMELINE (compteurs) ──────────────────────────────────────────
+// ── PIED DE TIMELINE ───────────────────────────────────────────────────────
 function updateFooter() {
   const total = blocks.reduce((s, b) => s + b.duration, 0);
   const pourvuCount = blocks.filter(b => b.pourvu).length;
@@ -449,12 +497,7 @@ function updateFooter() {
   }
 }
 
-// ── PANNEAU DE DÉTAIL D'UN BLOC ────────────────────────────────────────────
-
-/**
- * Ouvre le panneau de droite avec les informations du bloc.
- * @param {number} id - Identifiant du bloc
- */
+// ── PANNEAU DE DÉTAIL ──────────────────────────────────────────────────────
 function openDetail(id) {
   activeBlockId = id;
   const b = blocks.find(x => x.id == id);
@@ -464,7 +507,6 @@ function openDetail(id) {
   document.getElementById('detailBadge').textContent = TYPE_LABELS[b.type] || b.type;
   document.getElementById('detailBadge').style.setProperty('--dc', c);
 
-  // Construction du contenu du panneau (y compris la bannière "pourvu" si applicable)
   document.getElementById('detailBody').innerHTML = `
     ${b.pourvu ? `
     <div class="pourvu-banner">
@@ -476,6 +518,10 @@ function openDetail(id) {
         <div class="pourvu-filename">${b.pourvu.filename}</div>
         <div class="pourvu-score">Confiance Qwen : ${b.pourvu.score}%</div>
       </div>
+    </div>` : ''}
+    ${currentProject && currentProject._draft ? `
+    <div class="draft-banner">
+      ⚠ Plan non sauvegardé — créez le projet pour le persister
     </div>` : ''}
     <div class="detail-field">
       <div class="detail-field-label">Intitulé du plan</div>
@@ -508,34 +554,40 @@ function openDetail(id) {
 
   document.getElementById('detailPanel').classList.add('open');
 
-  // ── Écouteurs d'événements (dans openDetail pour être sûrs qu'ils existent) ──
   document.getElementById('det-name').addEventListener('input', e => {
     b.name = e.target.value;
+    b._dirty = true;
     renderTimeline();
   });
   document.getElementById('det-desc').addEventListener('input', e => {
     b.desc = e.target.value;
+    b._dirty = true;
   });
   document.getElementById('det-kw').addEventListener('input', e => {
     b.keywords = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
+    b._dirty = true;
   });
   document.getElementById('det-dur-range').addEventListener('input', e => {
     b.duration = parseInt(e.target.value);
+    b._dirty = true;
     document.getElementById('det-dur-val').textContent = fmtMin(b.duration);
     renderTimeline();
   });
-  // Bouton "Enregistrer" → sauvegarde via l'API
   document.getElementById('det-save').addEventListener('click', async () => {
-    await saveBlockToAPI(b);
-    showToast('Plan sauvegardé ✓');
+    if (currentProject && !currentProject._draft) {
+      await saveBlockToAPI(b);
+      b._dirty = false;
+      renderTimeline();
+    }
+    showToast(currentProject && currentProject._draft
+      ? 'Plan modifié (local) — créez le projet pour sauvegarder'
+      : 'Plan sauvegardé ✓');
   });
-  // Bouton "Supprimer"
   document.getElementById('det-delete').addEventListener('click', () => deleteBlock(id));
 
   renderTimeline();
 }
 
-/** Met à jour l'affichage de la durée dans le panneau (appelé depuis le resize) */
 function refreshDetailDuration(dur) {
   const r = document.getElementById('det-dur-range');
   const v = document.getElementById('det-dur-val');
@@ -543,7 +595,6 @@ function refreshDetailDuration(dur) {
   if (v) v.textContent = fmtMin(dur);
 }
 
-/** Ferme le panneau de détail */
 function closeDetail() {
   activeBlockId = null;
   document.getElementById('detailPanel').classList.remove('open');
@@ -552,7 +603,7 @@ function closeDetail() {
 
 document.getElementById('detailClose').addEventListener('click', closeDetail);
 
-// ── SÉLECTION DU TYPE DE PLAN (formulaire de gauche) ────────────────────────
+// ── SÉLECTION DU TYPE ──────────────────────────────────────────────────────
 document.querySelectorAll('.type-opt').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.type-opt').forEach(b => b.classList.remove('sel'));
@@ -584,7 +635,7 @@ document.getElementById('importMdBtn').addEventListener('click', () => {
   document.getElementById('mdFileInput').click();
 });
 document.getElementById('mdFileInput').addEventListener('change', async e => {
-  if (!currentProject) { showToast('⚠ Ouvrez un projet d\'abord'); return; }
+  if (!currentProject) { showToast('⚠ Aucun projet actif'); return; }
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
@@ -597,22 +648,17 @@ document.getElementById('mdFileInput').addEventListener('change', async e => {
       if (m2 || m3) {
         const name = (m2 || m3)[1].trim();
         const type = m3 ? 'broll' : 'interview';
-        const payload = {
-          type: type,
-          name: name,
-          description: '',
-          duration: 5,
-          keywords: []
-        };
-        const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
-          method: 'POST',
-          body: JSON.stringify(payload)
-        });
-        if (data) {
-          blocks.push({ id: data.id, type: data.type, name: data.name,
-                        desc: data.description, duration: data.duration,
-                        keywords: [], pourvu: null });
+        if (currentProject._draft) {
+          blocks.push({ id: 'tmp_' + Date.now() + '_' + added, type, name, desc: '', duration: 5, keywords: [], pourvu: null, _dirty: true });
           added++;
+        } else {
+          const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
+            method: 'POST', body: JSON.stringify({ type, name, description: '', duration: 5, keywords: [] })
+          });
+          if (data) {
+            blocks.push({ id: data.id, type: data.type, name: data.name, desc: data.description, duration: data.duration, keywords: [], pourvu: null, _dirty: false });
+            added++;
+          }
         }
       }
     }
@@ -623,17 +669,16 @@ document.getElementById('mdFileInput').addEventListener('change', async e => {
   e.target.value = '';
 });
 
-// ── BOUTON "PROJETS" DANS LA TOPBAR ────────────────────────────────────────
+// ── BOUTON PROJETS DANS LA TOPBAR ──────────────────────────────────────────
 document.getElementById('openProjectsBtn').addEventListener('click', loadProjectList);
 
 // ── INITIALISATION ─────────────────────────────────────────────────────────
 (function init() {
-  renderTimeline();   // affiche une timeline vide
   if (!token) {
-    // Pas de token → modale de connexion
     document.getElementById('loginModal').classList.add('open');
   } else {
-    // Token existant → liste des projets
-    loadProjectList();
+    initDraftProject();
   }
+  renderTimeline();
+  updateSaveButton();
 })();
