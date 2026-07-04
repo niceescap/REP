@@ -166,7 +166,7 @@ def list_rushes(
     # Récupérer tous les rushs liés au projet
     rows = db.execute(
         """SELECT id, filename, mimetype, description, metadata,
-                  matched_plan, uploaded_at
+                  matched_plan, score, uploaded_at
            FROM rushes WHERE project_uid = ?""",
         (project_uid,)
     ).fetchall()
