@@ -1,34 +1,48 @@
 // =============================================================================
-// Rush Event Pilot — Timeline Editor (script_editor.js)
+// Rush Event Pilot — Éditeur de Timeline (script_editor.js)
 // =============================================================================
-// Mode "bac à sable" : la timeline est éditable immédiatement dans un projet
-// implicite non sauvegardé (comme un document Word sans titre).
-// La persistance (création projet + blocs) se fait en un clic.
+// Ce script gère toute l'interface du réalisateur :
+//   1. Authentification (login / mode invité)
+//   2. Gestion des projets (créer, ouvrir, sauvegarder)
+//   3. Gestion des blocs/plans (ajouter, modifier, supprimer)
+//   4. Rendu de la timeline (blocs proportionnels, règle, curseur)
+//   5. Panneau de prévisualisation (détails du bloc sélectionné)
+//
+// Le script est chargé en fin de <body> : tous les éléments DOM existent déjà.
 // =============================================================================
 
-// ── CONFIGURATION ──────────────────────────────────────────────────────────
+// ── CONFIGURATION ──────────────────────────────────────────────
+// L'API est servie sur la même URL que le frontend (pas de préfixe)
 const API = '';
 
-// ── ÉTAT GLOBAL ────────────────────────────────────────────────────────────
-let token = localStorage.getItem('rep_token') || null;
-let currentProject = null;          // { _draft:true, label, project_uid:null } ou { project_uid, label }
-let blocks = [];                    // liste des plans, chaque bloc a { id, type, name, desc, duration, keywords, pourvu, _dirty }
-let activeBlockId = null;
-let totalDuration = 90;
-let zoom = 1;
-let selectedType = 'ouverture';
+// ── ÉTAT GLOBAL ────────────────────────────────────────────────
+// Ces variables stockent l'état courant de l'application.
+let token = localStorage.getItem('rep_token') || null;  // JWT d'auth
+let currentProject = null;    // Projet actif : { _draft, label, project_uid }
+let blocks = [];               // Liste des plans [{ id, type, name, desc, duration, keywords, pourvu, _dirty }]
+let activeBlockId = null;      // ID du bloc sélectionné (null = aucun)
+let totalDuration = 90;        // Durée totale du projet en minutes
+let zoom = 1;                  // Niveau de zoom (0.5 à 4)
+let selectedType = 'ouverture'; // Type de plan sélectionné dans le formulaire
+let cursorPos = 0;             // Position du curseur de navigation en minutes
 
+// Couleurs par type de plan
 const TYPE_COLORS = {
   ouverture: '#4DA6FF', interview: '#FF5E3A',
   broll: '#A8FF47', transition: '#C47FFF', cloture: '#FFB830',
 };
+// Libellés affichés par type de plan
 const TYPE_LABELS = {
   ouverture: 'Ouverture', interview: 'Interview',
   broll: 'B-Roll', transition: 'Transition', cloture: 'Clôture',
 };
 
-// ── UTILITAIRES ────────────────────────────────────────────────────────────
+// ── UTILITAIRES ────────────────────────────────────────────────
 
+/**
+ * Formate un nombre de minutes en texte lisible.
+ * Ex : 5 → "5 min", 65 → "1h05", 90 → "1h30"
+ */
 function fmtMin(m) {
   const h = Math.floor(m / 60);
   const mn = Math.round(m % 60);
@@ -36,6 +50,10 @@ function fmtMin(m) {
   return `${mn} min`;
 }
 
+/**
+ * Affiche un message temporaire (toast) en bas de l'écran.
+ * Disparaît automatiquement après 2,2 secondes.
+ */
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -43,6 +61,9 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 2200);
 }
 
+/**
+ * Renvoie les en-têtes HTTP pour les requêtes API authentifiées.
+ */
 function authHeaders() {
   return {
     'Authorization': `Bearer ${token}`,
@@ -50,140 +71,96 @@ function authHeaders() {
   };
 }
 
+/**
+ * Effectue une requête API et gère les erreurs courantes (401, réseau).
+ * Renvoie le JSON de la réponse, ou null en cas d'erreur.
+ */
 async function apiFetch(path, opts = {}) {
-  const res = await fetch(API + path, {
-    ...opts,
-    headers: { ...authHeaders(), ...(opts.headers || {}) }
-  });
-  if (res.status === 401) {
-    // En mode invité (pas de token), on ne redirige pas vers la modale.
-    // On affiche juste un toast discret.
-    if (token) {
-      logout();
-    } else {
-      showToast('⚠ Connexion requise pour cette action');
+  try {
+    const res = await fetch(API + path, {
+      ...opts,
+      headers: { ...authHeaders(), ...(opts.headers || {}) }
+    });
+    if (res.status === 401) {
+      if (token) { logout(); } else { showToast('⚠ Connexion requise'); }
+      return null;
     }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast('⚠ ' + (err.detail || 'Erreur API'));
+      return null;
+    }
+    return res.json();
+  } catch (e) {
+    showToast('⚠ Erreur réseau');
     return null;
-  }
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    showToast('⚠ ' + (err.detail || 'Erreur API'));
-    return null;
-  }
-  return res.json();
-}
-
-/** Met à jour le libellé et l'icône du bouton principal selon l'état */
-function updateSaveButton() {
-  const btn = document.getElementById('saveBtn');
-  if (!currentProject || currentProject._draft) {
-    btn.innerHTML = `
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-        <polyline points="17 21 17 13 7 13 7 21"/>
-        <polyline points="7 3 7 8 15 8"/>
-      </svg> Créer projet`;
-  } else {
-    btn.innerHTML = `
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
-        <polyline points="17 21 17 13 7 13 7 21"/>
-        <polyline points="7 3 7 8 15 8"/>
-      </svg> Enregistrer`;
   }
 }
 
-// ── AUTHENTIFICATION ───────────────────────────────────────────────────────
+// ── AUTHENTIFICATION ────────────────────────────────────────────
 
+/** Déconnexion : efface le token et réinitialise l'état */
 function logout() {
   token = null;
   localStorage.removeItem('rep_token');
-  currentProject = null;
-  blocks = [];
-  updateSaveButton();
+  initDraftProject();
   renderTimeline();
+  updateSaveButton();
   document.getElementById('loginModal').classList.add('open');
   document.getElementById('projectModal').classList.remove('open');
 }
 
+/** Mode invité : ferme la modale et initialise un brouillon local */
 function enterGuestMode() {
-  // Ferme la modale et initialise un brouillon sans token.
-  // Les appels API échoueront proprement car apiFetch gère les 401.
   document.getElementById('loginModal').classList.remove('open');
   document.getElementById('loginError').textContent = '';
-  showToast('Mode invité — vos plans restent en local');
   initDraftProject();
   renderTimeline();
   updateSaveButton();
+  showToast('Mode invité — plans en local uniquement');
 }
 
-document.getElementById('guestBtn').addEventListener('click', enterGuestMode);
+// ── GESTION DES PROJETS ────────────────────────────────────────
 
-document.getElementById('loginForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  const username = document.getElementById('loginUser').value.trim();
-  const password = document.getElementById('loginPass').value;
-  const body = new URLSearchParams({ username, password });
-  const res = await fetch(API + '/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
-  if (!res.ok) {
-    document.getElementById('loginError').textContent = 'Identifiants incorrects';
-    return;
-  }
-  const data = await res.json();
-  token = data.access_token;
-  localStorage.setItem('rep_token', token);
-  document.getElementById('loginModal').classList.remove('open');
-  initDraftProject();
-  renderTimeline();
-  showToast('Connecté — commencez à construire votre timeline');
-});
-
-// ── PROJET DRAFT (bac à sable) ─────────────────────────────────────────────
-
-/** Initialise un projet non sauvegardé (mode brouillon). */
+/** Initialise un projet brouillon (non sauvegardé en base) */
 function initDraftProject() {
   currentProject = { _draft: true, label: 'Sans titre', project_uid: null };
   blocks = [];
+  activeBlockId = null;
+  cursorPos = 0;
   document.getElementById('projectName').value = 'Sans titre';
-  updateSaveButton();
+  closeDetail();
 }
 
-// ── GESTION DES PROJETS ────────────────────────────────────────────────────
-
+/** Charge la liste des projets depuis l'API et affiche la modale */
 async function loadProjectList() {
   const data = await apiFetch('/api/projects');
   if (!data) return;
   const list = document.getElementById('projectList');
   list.innerHTML = '';
   if (data.length === 0) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:8px 0">Aucun projet — créez-en un ci-dessous.</div>';
+    list.innerHTML = '<p class="muted-text">Aucun projet — créez-en un ci-dessous.</p>';
   }
   data.forEach(p => {
     const el = document.createElement('div');
     el.className = 'proj-item';
-    el.innerHTML = `
-      <div class="proj-item-label">${p.label}</div>
-      <div class="proj-item-uid">${p.project_uid}</div>
-    `;
+    el.innerHTML = `<div class="proj-item-label">${p.label}</div><div class="proj-item-uid">${p.project_uid}</div>`;
     el.addEventListener('click', () => openProject(p));
     list.appendChild(el);
   });
   document.getElementById('projectModal').classList.add('open');
 }
 
+/** Ferme la modale des projets */
 function hideProjectModal() {
   document.getElementById('projectModal').classList.remove('open');
 }
 
-/** Ouvre un projet existant (remplace le brouillon en cours). */
+/** Ouvre un projet existant (charge ses blocs depuis l'API) */
 async function openProject(p) {
-  const hasDirtyBlocks = blocks.some(b => b._dirty);
-  if (hasDirtyBlocks && currentProject && currentProject._draft) {
-    if (!confirm('Vous avez des modifications non sauvegardées. Les abandonner ?')) return;
+  const hasDirty = blocks.some(b => b._dirty);
+  if (hasDirty && currentProject && currentProject._draft) {
+    if (!confirm('Modifications non sauvegardées. Les abandonner ?')) return;
   }
   currentProject = { project_uid: p.project_uid, label: p.label, _draft: false };
   hideProjectModal();
@@ -193,83 +170,21 @@ async function openProject(p) {
   showToast(`Projet "${p.label}" chargé`);
 }
 
-// ── BOUTON PRINCIPAL : CRÉER / ENREGISTRER ─────────────────────────────────
+// ── BOUTON SAUVEGARDER / CRÉER ─────────────────────────────────
 
-document.getElementById('saveBtn').addEventListener('click', async () => {
-  const label = document.getElementById('projectName').value.trim();
-  if (!label) { showToast('⚠ Donnez un nom au projet'); return; }
-
-  // Cas 1 : projet brouillon → création groupée (projet + blocs)
-  if (currentProject && currentProject._draft) {
-    const data = await apiFetch('/api/projects', {
-      method: 'POST',
-      body: JSON.stringify({ label })
-    });
-    if (!data) return;
-
-    currentProject = { project_uid: data.project_uid, label: data.label, _draft: false };
-    document.getElementById('projectName').value = data.label;
-    updateSaveButton();
-
-    // Envoyer tous les blocs un par un
-    let saved = 0;
-    for (const b of blocks) {
-      const payload = { type: b.type, name: b.name, description: b.desc, duration: b.duration, keywords: b.keywords };
-      const blockData = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
-      if (blockData) {
-        b.id = blockData.id;
-        b._dirty = false;
-        saved++;
-      }
-    }
-    showToast(`Projet "${label}" créé ✓ · ${saved} plan(s) sauvegardé(s)`);
-    renderTimeline();
-    return;
+/** Met à jour le texte du bouton principal selon l'état du projet */
+function updateSaveButton() {
+  const btn = document.getElementById('saveBtn');
+  if (!currentProject || currentProject._draft) {
+    btn.textContent = '💾 Créer projet';
+  } else {
+    btn.textContent = '💾 Enregistrer';
   }
+}
 
-  // Cas 2 : projet connecté → sauvegarde des blocs modifiés
-  if (currentProject && !currentProject._draft) {
-    let saved = 0;
-    for (const b of blocks.filter(b => b._dirty)) {
-      await saveBlockToAPI(b);
-      b._dirty = false;
-      saved++;
-    }
-    showToast(saved > 0 ? `${saved} plan(s) sauvegardé(s) ✓` : 'Aucune modification');
-    return;
-  }
-});
+// ── GESTION DES BLOCS ──────────────────────────────────────────
 
-// ── CRÉATION DE PROJET DEPUIS LA MODALE ────────────────────────────────────
-document.getElementById('createProjectBtn').addEventListener('click', async () => {
-  const label = document.getElementById('newProjectLabel').value.trim();
-  if (!label) { showToast('⚠ Donnez un nom'); return; }
-  const data = await apiFetch('/api/projects', {
-    method: 'POST',
-    body: JSON.stringify({ label })
-  });
-  if (!data) return;
-  await openProject(data);
-  showToast(`Projet "${data.label}" créé ✓`);
-});
-
-// ── FERMETURE MODALE PROJETS ───────────────────────────────────────────────
-document.getElementById('projectModalClose').addEventListener('click', hideProjectModal);
-document.getElementById('projectModal').addEventListener('click', e => {
-  if (e.target === document.getElementById('projectModal')) hideProjectModal();
-});
-
-// ── DÉCONNEXION ────────────────────────────────────────────────────────────
-document.getElementById('modalLogoutBtn').addEventListener('click', () => {
-  hideProjectModal();
-  logout();
-});
-
-// ── GESTION DES BLOCS ──────────────────────────────────────────────────────
-
+/** Charge les blocs d'un projet depuis l'API */
 async function loadBlocks() {
   if (!currentProject || currentProject._draft) return;
   const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`);
@@ -280,7 +195,7 @@ async function loadBlocks() {
     name: b.name,
     desc: b.description,
     duration: b.duration,
-    keywords: Array.isArray(b.keywords) ? b.keywords : (b.keywords || '').split(',').map(s => s.trim()),
+    keywords: Array.isArray(b.keywords) ? b.keywords : [],
     pourvu: null,
     _dirty: false
   }));
@@ -288,6 +203,7 @@ async function loadBlocks() {
   renderTimeline();
 }
 
+/** Associe les rushs aux blocs (statut "pourvu") en interrogeant l'API */
 async function enrichBlocksWithRushes() {
   if (!currentProject || currentProject._draft) return;
   const rushes = await apiFetch(`/api/projects/${currentProject.project_uid}/rushes`);
@@ -299,7 +215,7 @@ async function enrichBlocksWithRushes() {
       try {
         const meta = JSON.parse(match.metadata || '{}');
         cadreur = meta.cadreur || cadreur;
-      } catch (e) { }
+      } catch (e) { /* metadata invalide → on garde "cadreur" */ }
       b.pourvu = {
         cadreur: cadreur,
         filename: match.filename,
@@ -313,55 +229,22 @@ async function enrichBlocksWithRushes() {
   });
 }
 
-// ── AJOUTER UN BLOC (formulaire de gauche) ─────────────────────────────────
-document.getElementById('addBlockBtn').addEventListener('click', () => {
-  if (!currentProject) { showToast('⚠ Aucun projet actif'); return; }
-  const name = document.getElementById('newBlockName').value.trim();
-  const desc = document.getElementById('newBlockDesc').value.trim();
-  const dur = Math.max(1, parseInt(document.getElementById('newBlockDur').value) || 5);
-
-  const newBlock = {
-    id: 'tmp_' + Date.now(),
-    type: selectedType,
-    name: name || 'Plan sans titre',
-    desc: desc,
-    duration: dur,
-    keywords: [],
-    pourvu: null,
-    _dirty: true
-  };
-  blocks.push(newBlock);
-  document.getElementById('newBlockName').value = '';
-  document.getElementById('newBlockDesc').value = '';
-  document.getElementById('newBlockDur').value = 5;
-  renderTimeline();
-  showToast('Plan ajouté' + (currentProject._draft ? ' (non sauvegardé)' : ''));
-});
-
-// ── BOUTON DANS L'ÉTAT VIDE ────────────────────────────────────────────────
-document.getElementById('emptyAddBlockBtn').addEventListener('click', () => {
-  document.getElementById('addBlockBtn').click();
-});
-
+/** Sauvegarde un bloc modifié vers l'API (PUT) */
 async function saveBlockToAPI(b) {
   if (!currentProject || currentProject._draft) return;
+  if (String(b.id).startsWith('tmp_')) return;
   await apiFetch(`/api/projects/${currentProject.project_uid}/blocks/${b.id}`, {
     method: 'PUT',
     body: JSON.stringify({
-      type: b.type,
-      name: b.name,
-      description: b.desc,
-      duration: b.duration,
-      keywords: b.keywords
+      type: b.type, name: b.name, description: b.desc,
+      duration: b.duration, keywords: b.keywords
     })
   });
 }
 
+/** Supprime un bloc (local si brouillon, API si projet connecté) */
 async function deleteBlock(id) {
   if (!currentProject) return;
-  const b = blocks.find(x => x.id == id);
-
-  // Si brouillon ou ID temporaire → suppression locale uniquement
   if (currentProject._draft || String(id).startsWith('tmp_')) {
     blocks = blocks.filter(x => x.id != id);
     closeDetail();
@@ -369,8 +252,6 @@ async function deleteBlock(id) {
     showToast('Plan supprimé');
     return;
   }
-
-  // Projet connecté → suppression API
   await apiFetch(`/api/projects/${currentProject.project_uid}/blocks/${id}`, { method: 'DELETE' });
   blocks = blocks.filter(x => x.id != id);
   closeDetail();
@@ -378,133 +259,108 @@ async function deleteBlock(id) {
   showToast('Plan supprimé');
 }
 
-// ── RÈGLE GRADUÉE ─────────────────────────────────────────────────────────
-function drawRuler() {
-  const canvas = document.getElementById('rulerCanvas');
-  const track = document.getElementById('timelineTrack');
-  const W = track.scrollWidth || 600;
-  canvas.width = W;
-  canvas.height = 28;
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, W, 28);
-  ctx.font = '9px JetBrains Mono, monospace';
-  const pxPerMin = (W - 32) / totalDuration;
-  const step = totalDuration <= 30 ? 1 : totalDuration <= 90 ? 5 : totalDuration <= 180 ? 10 : 15;
-  for (let m = 0; m <= totalDuration; m += step) {
-    const x = 16 + m * pxPerMin;
-    ctx.fillStyle = '#353545';
-    ctx.fillRect(x, 18, 1, 10);
-    ctx.fillStyle = '#6B6B85';
-    ctx.fillText(fmtMin(m), x + 2, 14);
-  }
+// ── RENDU DE LA TIMELINE ───────────────────────────────────────
+
+/**
+ * Calcule la largeur de la piste en pixels selon le zoom.
+ * Base : au moins 320px (taille mobile), plafonnée à 4000px.
+ */
+function getTrackWidth() {
+  const base = Math.max(320, window.innerWidth * 1.2);
+  return Math.min(base * zoom, 4000);
 }
 
-// ── RENDU DE LA TIMELINE ───────────────────────────────────────────────────
+/**
+ * Rend la timeline : crée les éléments DOM pour chaque bloc,
+ * dessine la règle, positionne le curseur, met à jour les compteurs.
+ */
 function renderTimeline() {
   const track = document.getElementById('timelineTrack');
+  const inner = document.getElementById('timelineInner');
   const empty = document.getElementById('emptyState');
-  // trackWidth relatif au viewport pour éviter le scroll forcé sur mobile.
-  // On garde un minimum de 320px (taille iPhone SE) et on laisse le zoom agir.
-  const trackWidth = Math.max(320, Math.min(window.innerWidth * 1.2, 800 * zoom));
+  const cursor = document.getElementById('timelineCursor');
+  const trackWidth = getTrackWidth();
 
+  // Fixe la largeur du contenu intérieur (pour le scroll horizontal)
+  inner.style.minWidth = trackWidth + 'px';
+
+  // Vider les anciens blocs (on garde emptyState et cursor qui ne sont pas .block)
   [...track.querySelectorAll('.block')].forEach(el => el.remove());
 
   if (blocks.length === 0) {
+    // État vide
     empty.style.display = 'flex';
-    empty.style.minWidth = trackWidth + 'px';
+    cursor.style.display = 'none';
     drawRuler();
     updateFooter();
     return;
   }
   empty.style.display = 'none';
+  cursor.style.display = 'block';
 
+  // Créer un élément DOM pour chaque bloc
   blocks.forEach(b => {
+    // Largeur proportionnelle à la durée du bloc vs durée totale
     const ratio = b.duration / (totalDuration || 1);
     const w = Math.max(70, Math.floor(ratio * trackWidth));
     const el = document.createElement('div');
-    el.className = `block type-${b.type}${b.pourvu ? ' pourvu' : ''}${b._dirty ? ' dirty' : ''}`;
+    el.className = `block type-${b.type}`;
+    if (b.pourvu) el.classList.add('pourvu');
+    if (b._dirty) el.classList.add('dirty');
+    if (b.id === activeBlockId) el.classList.add('active');
     el.dataset.id = b.id;
     el.style.width = w + 'px';
     el.style.flexShrink = '0';
-    if (b.id === activeBlockId) el.classList.add('active');
     el.innerHTML = `
-      <div class="block-label">${TYPE_LABELS[b.type] || b.type}${b._dirty ? ' ·' : ''}</div>
+      <div class="block-label">${TYPE_LABELS[b.type] || b.type}</div>
       <div class="block-name">${b.name || 'Plan sans titre'}</div>
-      <div class="block-duration">${fmtMin(b.duration)}${b.pourvu ? ` · <span style="color:#A8FF47;font-size:9px">${b.pourvu.cadreur}</span>` : ''}</div>
-      <div class="block-resize" data-id="${b.id}"></div>
+      <div class="block-duration">${fmtMin(b.duration)}</div>
+      ${b.pourvu ? `<div class="block-badge">✓ ${b.pourvu.cadreur}</div>` : ''}
     `;
-    el.addEventListener('click', e => {
-      if (e.target.classList.contains('block-resize')) return;
-      openDetail(b.id);
-    });
+    // Clic sur un bloc → ouvrir le panneau de détail
+    el.addEventListener('click', () => openDetail(b.id));
     track.appendChild(el);
   });
 
-  setupResizeHandles();
   drawRuler();
+  updateCursor();
   updateFooter();
 }
 
-// ── REDIMENSIONNEMENT ──────────────────────────────────────────────────────
-function setupResizeHandles() {
-  document.querySelectorAll('.block-resize').forEach(handle => {
-    let startX, startDur, blockId;
-
-    const startResize = (x, id) => {
-      startX = x;
-      blockId = id;
-      const b = blocks.find(b => b.id == id);
-      startDur = b.duration;
-    };
-
-    const doResize = (x) => {
-      const trackWidth = Math.max(320, Math.min(window.innerWidth * 1.2, 800 * zoom));
-      const pxPerMin = trackWidth / totalDuration;
-      const b = blocks.find(b => b.id == blockId);
-      if (!b) return;
-      b.duration = Math.max(1, Math.round(startDur + (x - startX) / pxPerMin));
-      b._dirty = true;
-      renderTimeline();
-      if (activeBlockId == blockId) refreshDetailDuration(b.duration);
-    };
-
-    const finalizeResize = () => {
-      const b = blocks.find(b => b.id == blockId);
-      // Sauvegarde auto en mode connecté
-      if (b && currentProject && !currentProject._draft) {
-        saveBlockToAPI(b).then(() => { b._dirty = false; renderTimeline(); });
-      }
-    };
-
-    handle.addEventListener('mousedown', e => {
-      e.stopPropagation();
-      startResize(e.clientX, handle.dataset.id);
-      const onMove = e => doResize(e.clientX);
-      const onUp = () => {
-        finalizeResize();
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    });
-
-    handle.addEventListener('touchstart', e => {
-      e.stopPropagation();
-      startResize(e.touches[0].clientX, handle.dataset.id);
-      const onMove = e => { e.preventDefault(); doResize(e.touches[0].clientX); };
-      const onEnd = () => {
-        finalizeResize();
-        document.removeEventListener('touchmove', onMove);
-        document.removeEventListener('touchend', onEnd);
-      };
-      document.addEventListener('touchmove', onMove, { passive: false });
-      document.addEventListener('touchend', onEnd);
-    });
-  });
+/**
+ * Dessine la règle graduée sur le canvas.
+ * Les graduations s'adaptent à la durée totale (toutes les 1, 5, 10 ou 15 min).
+ */
+function drawRuler() {
+  const canvas = document.getElementById('rulerCanvas');
+  const trackWidth = getTrackWidth();
+  canvas.width = trackWidth;
+  canvas.height = 28;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, trackWidth, 28);
+  ctx.font = '9px monospace';
+  // Espacement des graduations selon la durée totale
+  const step = totalDuration <= 30 ? 1 : totalDuration <= 90 ? 5 : totalDuration <= 180 ? 10 : 15;
+  const pxPerMin = trackWidth / totalDuration;
+  for (let m = 0; m <= totalDuration; m += step) {
+    const x = m * pxPerMin;
+    ctx.fillStyle = '#353545';
+    ctx.fillRect(x, 18, 1, 10);           // trait
+    ctx.fillStyle = '#6B6B85';
+    ctx.fillText(fmtMin(m), x + 3, 14);   // texte
+  }
 }
 
-// ── PIED DE TIMELINE ───────────────────────────────────────────────────────
+/** Met à jour la position visuelle du curseur de navigation */
+function updateCursor() {
+  const cursor = document.getElementById('timelineCursor');
+  const trackWidth = getTrackWidth();
+  const left = (cursorPos / (totalDuration || 1)) * trackWidth;
+  cursor.style.left = left + 'px';
+  document.getElementById('cursorTime').textContent = fmtMin(Math.round(cursorPos));
+}
+
+/** Met à jour les compteurs en bas de la timeline */
 function updateFooter() {
   const total = blocks.reduce((s, b) => s + b.duration, 0);
   const pourvuCount = blocks.filter(b => b.pourvu).length;
@@ -512,51 +368,110 @@ function updateFooter() {
   document.getElementById('plannedTotal').textContent = fmtMin(total);
   document.getElementById('totalDisplay').textContent = fmtMin(totalDuration);
   const coverEl = document.getElementById('coverageCount');
-  if (coverEl) {
-    coverEl.textContent = pourvuCount;
-    coverEl.style.color = pourvuCount === blocks.length && blocks.length > 0 ? '#A8FF47' : '#FFB830';
+  coverEl.textContent = pourvuCount;
+  coverEl.style.color = pourvuCount === blocks.length && blocks.length > 0 ? '#A8FF47' : '#FFB830';
+}
+
+// ── CURSEUR DE NAVIGATION ─────────────────────────────────────
+
+/**
+ * Convertit une position en pixels (clientX) en minutes sur la timeline.
+ * Utilise getBoundingClientRect() qui tient compte du scroll horizontal.
+ */
+function pixelToMinutes(clientX) {
+  const track = document.getElementById('timelineTrack');
+  const rect = track.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const trackWidth = getTrackWidth();
+  const minutes = (x / trackWidth) * totalDuration;
+  return Math.max(0, Math.min(totalDuration, minutes));
+}
+
+/**
+ * Configure le drag du curseur (souris + touch) et le clic sur la règle.
+ * Appelé une seule fois au chargement.
+ */
+function setupCursorDrag() {
+  const cursor = document.getElementById('timelineCursor');
+  let isDragging = false;
+
+  function startDrag(e) {
+    e.stopPropagation();
+    isDragging = true;
+    document.body.style.userSelect = 'none';  // empêche la sélection de texte
+  }
+  function doDrag(clientX) {
+    if (!isDragging) return;
+    cursorPos = pixelToMinutes(clientX);
+    updateCursor();
+  }
+  function endDrag() {
+    isDragging = false;
+    document.body.style.userSelect = '';
+  }
+
+  // Événements souris
+  cursor.addEventListener('mousedown', startDrag);
+  document.addEventListener('mousemove', e => doDrag(e.clientX));
+  document.addEventListener('mouseup', endDrag);
+
+  // Événements tactiles (pour mobile)
+  cursor.addEventListener('touchstart', e => { e.preventDefault(); startDrag(e); }, { passive: false });
+  document.addEventListener('touchmove', e => {
+    if (isDragging) { e.preventDefault(); doDrag(e.touches[0].clientX); }
+  }, { passive: false });
+  document.addEventListener('touchend', endDrag);
+
+  // Clic sur la règle → déplacer le curseur à cette position
+  const ruler = document.querySelector('.ruler');
+  if (ruler) {
+    ruler.addEventListener('click', e => {
+      if (blocks.length > 0) {
+        cursorPos = pixelToMinutes(e.clientX);
+        updateCursor();
+      }
+    });
   }
 }
 
-// ── PREVIEW / DÉTAIL DU PLAN ───────────────────────────────────────────────
-// Ancien fonctionnement : openDetail() ouvrait un panneau latéral droit.
-// Nouveau fonctionnement mobile-first : openDetail() remplit la zone .preview-area
-// placée au-dessus de la timeline, comme une fenêtre de prévisualisation CapCut.
+// ── PANNEAU DE DÉTAIL (ZONE PREVIEW) ────────────────────────────
+
+/**
+ * Ouvre le panneau de détail pour un bloc donné.
+ * Construit le HTML avec les champs éditables et la bannière "pourvu" le cas échéant.
+ */
 function openDetail(id) {
   activeBlockId = id;
   const b = blocks.find(x => x.id == id);
   if (!b) return;
 
-  const detailPanel = document.getElementById('detailPanel');
-  const detailHeader = document.getElementById('detailHeader');
-  const detailBody = document.getElementById('detailBody');
-  const previewEmpty = document.getElementById('previewEmpty');
+  // Masquer l'état vide, afficher l'en-tête
+  document.getElementById('previewEmpty').hidden = true;
+  document.getElementById('detailHeader').hidden = false;
+  document.getElementById('previewArea').classList.add('open');
 
-  // On masque l'état vide et on affiche l'en-tête du plan sélectionné.
-  previewEmpty.hidden = true;
-  detailHeader.hidden = false;
-  detailPanel.classList.add('open');
-
+  // Badge coloré selon le type
   const c = TYPE_COLORS[b.type];
-  document.getElementById('detailBadge').textContent = TYPE_LABELS[b.type] || b.type;
-  document.getElementById('detailBadge').style.setProperty('--dc', c);
+  const badge = document.getElementById('detailBadge');
+  badge.textContent = TYPE_LABELS[b.type] || b.type;
+  badge.style.color = c;
+  badge.style.background = c + '22';  // '22' = ~13% d'opacité en hex
 
-  detailBody.innerHTML = `
+  // Construire le HTML du corps
+  document.getElementById('detailBody').innerHTML = `
     ${b.pourvu ? `
     <div class="pourvu-banner">
       <div class="pourvu-check">✅</div>
       <div class="pourvu-meta">
         <div class="pourvu-meta-title">Plan pourvu</div>
-        <div class="pourvu-meta-line">Cadreur : <span>${b.pourvu.cadreur}</span></div>
-        <div class="pourvu-meta-line">Tourné le : <span>${b.pourvu.date}</span> à <span>${b.pourvu.heure}</span></div>
+        <div class="pourvu-meta-line">Cadreur : <strong>${b.pourvu.cadreur}</strong></div>
+        <div class="pourvu-meta-line">Tourné le : ${b.pourvu.date} à ${b.pourvu.heure}</div>
         <div class="pourvu-filename">${b.pourvu.filename}</div>
         <div class="pourvu-score">Confiance Qwen : ${b.pourvu.score}%</div>
       </div>
     </div>` : ''}
     ${currentProject && currentProject._draft ? `
-    <div class="draft-banner">
-      ⚠ Plan non sauvegardé — créez le projet pour le persister
-    </div>` : ''}
+    <div class="draft-banner">⚠ Plan non sauvegardé — créez le projet pour le persister</div>` : ''}
     <div class="detail-field">
       <div class="detail-field-label">Intitulé du plan</div>
       <input class="detail-input" id="det-name" value="${b.name || ''}">
@@ -576,74 +491,209 @@ function openDetail(id) {
         <span class="detail-duration-val" id="det-dur-val">${fmtMin(b.duration)}</span>
       </div>
     </div>
-    <div class="detail-field" style="margin-top:8px">
-      <button class="btn btn-primary btn-sm" id="det-save" style="width:100%">Enregistrer</button>
-    </div>
-    <div class="detail-field" style="margin-top:8px;padding-top:12px;border-top:1px solid var(--border)">
-      <button class="btn btn-ghost btn-sm" id="det-delete" style="color:#FF5E3A;border-color:#FF5E3A33;width:100%">
-        Supprimer ce plan
-      </button>
-    </div>
+    <button class="btn btn-primary btn-sm" id="det-save" style="width:100%;margin-top:8px">Enregistrer</button>
+    <button class="btn btn-ghost btn-sm" id="det-delete" style="width:100%;margin-top:4px;color:#FF5E3A">Supprimer ce plan</button>
   `;
 
+  // Listeners sur les champs éditables
   document.getElementById('det-name').addEventListener('input', e => {
-    b.name = e.target.value;
-    b._dirty = true;
-    renderTimeline();
+    b.name = e.target.value; b._dirty = true; renderTimeline();
   });
   document.getElementById('det-desc').addEventListener('input', e => {
-    b.desc = e.target.value;
-    b._dirty = true;
+    b.desc = e.target.value; b._dirty = true;
   });
   document.getElementById('det-kw').addEventListener('input', e => {
     b.keywords = e.target.value.split(',').map(s => s.trim()).filter(Boolean);
     b._dirty = true;
   });
   document.getElementById('det-dur-range').addEventListener('input', e => {
-    b.duration = parseInt(e.target.value);
-    b._dirty = true;
+    b.duration = parseInt(e.target.value); b._dirty = true;
     document.getElementById('det-dur-val').textContent = fmtMin(b.duration);
     renderTimeline();
   });
   document.getElementById('det-save').addEventListener('click', async () => {
-    if (currentProject && !currentProject._draft) {
+    if (currentProject && !currentProject._draft && !String(b.id).startsWith('tmp_')) {
       await saveBlockToAPI(b);
       b._dirty = false;
       renderTimeline();
+      showToast('Plan sauvegardé ✓');
+    } else {
+      showToast('Plan modifié (local) — créez le projet pour sauvegarder');
     }
-    showToast(currentProject && currentProject._draft
-      ? 'Plan modifié (local) — créez le projet pour sauvegarder'
-      : 'Plan sauvegardé ✓');
   });
   document.getElementById('det-delete').addEventListener('click', () => deleteBlock(id));
 
   renderTimeline();
 }
 
-function refreshDetailDuration(dur) {
-  const r = document.getElementById('det-dur-range');
-  const v = document.getElementById('det-dur-val');
-  if (r) r.value = dur;
-  if (v) v.textContent = fmtMin(dur);
-}
-
+/** Ferme le panneau de détail et revient à l'état vide */
 function closeDetail() {
   activeBlockId = null;
-
-  // On remet la preview dans son état de repos : aucun plan sélectionné.
-  // Le contenu dynamique est vidé pour éviter de garder d'anciens listeners
-  // sur des champs qui ne sont plus visibles.
-  document.getElementById('detailPanel').classList.remove('open');
+  document.getElementById('previewArea').classList.remove('open');
   document.getElementById('detailHeader').hidden = true;
   document.getElementById('detailBody').innerHTML = '';
   document.getElementById('previewEmpty').hidden = false;
-
   renderTimeline();
 }
 
+// ── ÉVÉNEMENTS DOM ─────────────────────────────────────────────
+
+// --- Authentification : bouton invité ---
+document.getElementById('guestBtn').addEventListener('click', enterGuestMode);
+
+// --- Authentification : formulaire de connexion ---
+document.getElementById('loginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const username = document.getElementById('loginUser').value.trim();
+  const password = document.getElementById('loginPass').value;
+  const body = new URLSearchParams({ username, password });
+  try {
+    const res = await fetch(API + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    if (!res.ok) {
+      document.getElementById('loginError').textContent = 'Identifiants incorrects';
+      return;
+    }
+    const data = await res.json();
+    token = data.access_token;
+    localStorage.setItem('rep_token', token);
+    document.getElementById('loginModal').classList.remove('open');
+    document.getElementById('loginError').textContent = '';
+    initDraftProject();
+    renderTimeline();
+    updateSaveButton();
+    showToast('Connecté — commencez à construire votre timeline');
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'Erreur réseau';
+  }
+});
+
+// --- Bouton sauvegarder / créer projet ---
+document.getElementById('saveBtn').addEventListener('click', async () => {
+  const label = document.getElementById('projectName').value.trim();
+  if (!label) { showToast('⚠ Donnez un nom au projet'); return; }
+
+  // Cas 1 : projet brouillon → créer le projet + POST tous les blocs
+  if (currentProject && currentProject._draft) {
+    const data = await apiFetch('/api/projects', {
+      method: 'POST',
+      body: JSON.stringify({ label })
+    });
+    if (!data) return;
+    currentProject = { project_uid: data.project_uid, label: data.label, _draft: false };
+    document.getElementById('projectName').value = data.label;
+    updateSaveButton();
+    let saved = 0;
+    for (const b of blocks) {
+      const payload = { type: b.type, name: b.name, description: b.desc, duration: b.duration, keywords: b.keywords };
+      const blockData = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
+        method: 'POST', body: JSON.stringify(payload)
+      });
+      if (blockData) { b.id = blockData.id; b._dirty = false; saved++; }
+    }
+    showToast(`Projet "${label}" créé ✓ · ${saved} plan(s) sauvegardé(s)`);
+    renderTimeline();
+    return;
+  }
+
+  // Cas 2 : projet connecté → PUT les blocs modifiés
+  if (currentProject && !currentProject._draft) {
+    let saved = 0;
+    for (const b of blocks.filter(b => b._dirty && !String(b.id).startsWith('tmp_'))) {
+      await saveBlockToAPI(b);
+      b._dirty = false;
+      saved++;
+    }
+    showToast(saved > 0 ? `${saved} plan(s) sauvegardé(s) ✓` : 'Aucune modification');
+    renderTimeline();
+    return;
+  }
+});
+
+// --- Bouton projets (topbar) ---
+document.getElementById('openProjectsBtn').addEventListener('click', loadProjectList);
+
+// --- Création de projet depuis la modale ---
+document.getElementById('createProjectBtn').addEventListener('click', async () => {
+  const label = document.getElementById('newProjectLabel').value.trim();
+  if (!label) { showToast('⚠ Donnez un nom'); return; }
+  const data = await apiFetch('/api/projects', {
+    method: 'POST', body: JSON.stringify({ label })
+  });
+  if (!data) return;
+  document.getElementById('newProjectLabel').value = '';
+  await openProject(data);
+  showToast(`Projet "${data.label}" créé ✓`);
+});
+
+// --- Fermeture modale projets ---
+document.getElementById('projectModalClose').addEventListener('click', hideProjectModal);
+document.getElementById('projectModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('projectModal')) hideProjectModal();
+});
+
+// --- Déconnexion ---
+document.getElementById('modalLogoutBtn').addEventListener('click', () => {
+  hideProjectModal();
+  logout();
+});
+
+// --- Fermeture panneau de détail ---
 document.getElementById('detailClose').addEventListener('click', closeDetail);
 
-// ── SÉLECTION DU TYPE ──────────────────────────────────────────────────────
+// --- Ajout de bloc (bouton principal) ---
+document.getElementById('addBlockBtn').addEventListener('click', async () => {
+  if (!currentProject) { showToast('⚠ Aucun projet actif'); return; }
+  const name = document.getElementById('newBlockName').value.trim();
+  const desc = document.getElementById('newBlockDesc').value.trim();
+  const dur = Math.max(1, parseInt(document.getElementById('newBlockDur').value) || 5);
+
+  if (currentProject._draft) {
+    // Mode brouillon : ajout local uniquement
+    blocks.push({
+      id: 'tmp_' + Date.now(),
+      type: selectedType,
+      name: name || 'Plan sans titre',
+      desc: desc,
+      duration: dur,
+      keywords: [],
+      pourvu: null,
+      _dirty: true
+    });
+    renderTimeline();
+    showToast('Plan ajouté (non sauvegardé)');
+  } else {
+    // Projet connecté : POST immédiat vers l'API
+    const data = await apiFetch(`/api/projects/${currentProject.project_uid}/blocks`, {
+      method: 'POST',
+      body: JSON.stringify({ type: selectedType, name: name || 'Plan sans titre', description: desc, duration: dur, keywords: [] })
+    });
+    if (data) {
+      blocks.push({
+        id: data.id, type: data.type, name: data.name,
+        desc: data.description, duration: data.duration,
+        keywords: data.keywords || [], pourvu: null, _dirty: false
+      });
+      renderTimeline();
+      showToast('Plan ajouté ✓');
+    }
+  }
+
+  // Vider le formulaire
+  document.getElementById('newBlockName').value = '';
+  document.getElementById('newBlockDesc').value = '';
+  document.getElementById('newBlockDur').value = 5;
+});
+
+// --- Bouton "ajouter" dans l'état vide ---
+document.getElementById('emptyAddBlockBtn').addEventListener('click', () => {
+  document.getElementById('addBlockBtn').click();
+});
+
+// --- Sélection du type de plan (boutons) ---
 document.querySelectorAll('.type-opt').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.type-opt').forEach(b => b.classList.remove('sel'));
@@ -652,13 +702,14 @@ document.querySelectorAll('.type-opt').forEach(btn => {
   });
 });
 
-// ── DURÉE TOTALE ───────────────────────────────────────────────────────────
+// --- Changement de la durée totale ---
 document.getElementById('totalDurationInput').addEventListener('change', e => {
   totalDuration = Math.max(1, parseInt(e.target.value) || 90);
   renderTimeline();
+  updateFooter();
 });
 
-// ── ZOOM ───────────────────────────────────────────────────────────────────
+// --- Zoom in / out ---
 document.getElementById('zoomIn').addEventListener('click', () => {
   zoom = Math.min(4, zoom + 0.25);
   document.getElementById('zoomLabel').textContent = Math.round(zoom * 100) + '%';
@@ -670,7 +721,7 @@ document.getElementById('zoomOut').addEventListener('click', () => {
   renderTimeline();
 });
 
-// ── IMPORT MARKDOWN ────────────────────────────────────────────────────────
+// --- Import Markdown ---
 document.getElementById('importMdBtn').addEventListener('click', () => {
   document.getElementById('mdFileInput').click();
 });
@@ -706,22 +757,22 @@ document.getElementById('mdFileInput').addEventListener('change', async e => {
     showToast(`${added} plan(s) importé(s) ✓`);
   };
   reader.readAsText(file);
-  e.target.value = '';
+  e.target.value = '';  // reset pour permettre de réimporter le même fichier
 });
 
-// ── BOUTON PROJETS DANS LA TOPBAR ──────────────────────────────────────────
-document.getElementById('openProjectsBtn').addEventListener('click', loadProjectList);
+// ── INITIALISATION ─────────────────────────────────────────────
 
-// ── INITIALISATION ─────────────────────────────────────────────────────────
-(function init() {
-  // Mode invité par défaut : on initialise toujours un brouillon,
-  // même sans token. La modale ne bloque plus — elle s'affiche juste
-  // au-dessus d'une interface déjà fonctionnelle.
-  initDraftProject();
-  renderTimeline();
-  updateSaveButton();
+// Re-rend la timeline quand la fenêtre change de taille (rotation mobile)
+window.addEventListener('resize', () => renderTimeline());
 
-  if (!token) {
-    document.getElementById('loginModal').classList.add('open');
-  }
-})();
+// Configure le drag du curseur (une seule fois au chargement)
+setupCursorDrag();
+
+// Initialise un brouillon vide
+initDraftProject();
+updateSaveButton();
+
+// Affiche la modale de connexion si pas de token
+if (!token) {
+  document.getElementById('loginModal').classList.add('open');
+}
