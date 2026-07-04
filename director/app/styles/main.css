@@ -587,11 +587,11 @@ body {
 .timeline-empty .btn { margin-top: 2px; }
 
 /* scrollbar main */
-.panel-left::-webkit-scrollbar,
+.tools-bar::-webkit-scrollbar,
 .detail-body::-webkit-scrollbar { width: 4px; }
-.panel-left::-webkit-scrollbar-track,
+.tools-bar::-webkit-scrollbar-track,
 .detail-body::-webkit-scrollbar-track { background: transparent; }
-.panel-left::-webkit-scrollbar-thumb,
+.tools-bar::-webkit-scrollbar-thumb,
 .detail-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 /* type selector */
