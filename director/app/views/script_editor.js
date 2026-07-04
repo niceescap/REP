@@ -56,7 +56,13 @@ async function apiFetch(path, opts = {}) {
     headers: { ...authHeaders(), ...(opts.headers || {}) }
   });
   if (res.status === 401) {
-    logout();
+    // En mode invité (pas de token), on ne redirige pas vers la modale.
+    // On affiche juste un toast discret.
+    if (token) {
+      logout();
+    } else {
+      showToast('⚠ Connexion requise pour cette action');
+    }
     return null;
   }
   if (!res.ok) {
