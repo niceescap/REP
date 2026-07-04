@@ -44,6 +44,7 @@ def init_db():
             description TEXT NOT NULL,
             metadata    TEXT,
             matched_plan TEXT,
+            score REAL,
             uploaded_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (project_uid) REFERENCES projects(project_uid)
         );
