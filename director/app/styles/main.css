@@ -614,6 +614,49 @@ body {
   transition: all .12s;
   font-family: var(--sans);
 }
+
+/* ── RESPONSIVE ENHANCEMENTS ───────────────────────────────
+   Mobile d'abord : les règles ci-dessus sont valables sur smartphone.
+   Ces media queries améliorent simplement le confort sur tablette/desktop. */
+@media (max-width: 720px) {
+  .topbar {
+    gap: 8px;
+    padding: 6px 10px;
+    height: auto;
+    min-height: 48px;
+    flex-wrap: wrap;
+  }
+  .project-name-input {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .topbar-right {
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+  .total-duration-label,
+  .total-duration-unit,
+  #importMdBtn svg,
+  #saveBtn svg,
+  #openProjectsBtn svg { display: none; }
+  .preview-area { min-height: 135px; max-height: 32vh; }
+  .preview-area.open { min-height: 210px; }
+  .timeline-track { min-width: 520px; height: 72px; }
+  .timeline-empty { min-width: 320px; }
+}
+
+@media (min-width: 900px) {
+  .preview-area { min-height: 190px; max-height: 36vh; }
+  .tools-bar {
+    grid-template-columns: minmax(180px, .8fr) minmax(420px, 1.6fr) minmax(260px, 1fr);
+    align-items: start;
+    max-height: 260px;
+  }
+  .project-tool { min-height: 100%; }
+  .compact-grid { grid-template-columns: 1fr; }
+  .tc-total { flex-basis: auto; margin-left: auto; }
+}
 .type-opt:hover { border-color: var(--muted); color: var(--text); }
 .type-opt.sel { background: color-mix(in srgb, var(--tc) 18%, transparent); border-color: var(--tc); color: var(--tc); }
 
