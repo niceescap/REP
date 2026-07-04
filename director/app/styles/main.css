@@ -582,6 +582,26 @@ body {
   margin-bottom: 18px;
   color: var(--fg);
 }
+/* ── MODAL HEADER (titre + ✕) ─────────────────────────────── */
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.modal-header .modal-title { margin-bottom: 0; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all .15s;
+}
+.modal-close:hover { background: var(--surface3); color: var(--text); }
 
 /* ── PROJECT LIST ────────────────────────────────────────── */
 .proj-item {
