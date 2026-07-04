@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rush Event Pilot — Nouveau projet</title>
+  <link rel="stylesheet" href="app/styles/main.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="topbar">
+  <span class="topbar-logo">REP</span>
+  <div class="topbar-sep"></div>
+
+  <!-- Bouton pour ouvrir la liste des projets -->
+  <button class="btn btn-ghost btn-sm" id="openProjectsBtn">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+      <polyline points="9 22 9 12 15 12 15 22"/>
+    </svg>
+    Projets
+  </button>
+
+  <input class="project-name-input" id="projectName" placeholder="Nom du projet..." value="Conférence Tech — 14 juin 2025">
+
+  <div class="topbar-right">
+    <div class="total-duration-wrap" title="Durée totale du projet (en minutes)">
+      <span class="total-duration-label">Durée totale</span>
+      <input class="total-duration-input" id="totalDurationInput" type="number" value="90" min="1" max="600">
+      <span class="total-duration-unit">min</span>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="importMdBtn">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      Import MD
+    </button>
+    <button class="btn btn-primary btn-sm" id="saveBtn">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/>
+        <polyline points="7 3 7 8 15 8"/>
+      </svg>
+      Créer projet
+    </button>
+  </div>
+</div>
+
+<!-- WORKSPACE -->
+<div class="workspace">
+
+  <!-- LEFT: project meta -->
+  <div class="panel-left">
+    <div class="panel-section">
+      <div class="panel-section-title">Informations</div>
+      <div class="form-field">
+        <label class="form-label">Description</label>
+        <textarea class="form-input form-textarea" placeholder="Contexte de l'événement..."></textarea>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Lieu</label>
+        <input class="form-input" type="text" placeholder="Paris, salle A">
+      </div>
+      <div class="form-field">
+        <label class="form-label">Date</label>
+        <input class="form-input" type="date" value="2025-06-14">
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-title">Ajouter un plan</div>
+      <div class="form-field">
+        <label class="form-label">Type</label>
+        <div class="type-select" id="typeSelect">
+          <button class="type-opt sel" data-type="ouverture" style="--tc:#4DA6FF">Ouverture</button>
+          <button class="type-opt" data-type="interview" style="--tc:#FF5E3A">Interview</button>
+          <button class="type-opt" data-type="broll" style="--tc:#A8FF47">B-roll</button>
+          <button class="type-opt" data-type="transition" style="--tc:#C47FFF">Transition</button>
+          <button class="type-opt" data-type="cloture" style="--tc:#FFB830">Clôture</button>
+        </div>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Intitulé du plan</label>
+        <input class="form-input" id="newBlockName" type="text" placeholder="ex. Introduction speakers">
+      </div>
+      <div class="form-field">
+        <label class="form-label">Description attendue</label>
+        <textarea class="form-input form-textarea" id="newBlockDesc" placeholder="Ce que le cadreur doit capturer..."></textarea>
+      </div>
+      <div class="form-field">
+        <label class="form-label">Durée estimée (min)</label>
+        <input class="form-input" id="newBlockDur" type="number" value="5" min="1">
+      </div>
+      <button class="add-block-btn" id="addBlockBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Ajouter à la timeline
+      </button>
+    </div>
+
+    <div class="panel-section" style="flex:1">
+      <div class="panel-section-title">Pré-script Markdown</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.6">
+        Importez un fichier <code style="color:var(--accent);background:var(--surface3);padding:1px 4px;border-radius:3px">.md</code> pour générer automatiquement les blocs de la timeline à partir de vos titres de niveaux 2 (<code style="color:var(--muted)"># ## ###</code>).
+      </div>
+      <input type="file" id="mdFileInput" accept=".md,.txt" style="display:none">
+    </div>
+  </div>
+
+  <!-- MAIN: timeline -->
+  <div class="panel-main">
+    <!-- ruler -->
+    <div class="ruler">
+      <canvas class="ruler-canvas" id="rulerCanvas"></canvas>
+    </div>
+
+    <!-- timeline scroll -->
+    <div class="timeline-scroll" id="timelineScroll">
+      <div class="timeline-track" id="timelineTrack">
+        <div class="timeline-empty" id="emptyState">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Ajoutez des plans pour construire votre timeline
+        </div>
+      </div>
+    </div>
+
+    <!-- timeline controls -->
+    <div class="timeline-controls">
+      <span class="tc-label">Zoom</span>
+      <div class="tc-zoom">
+        <button id="zoomOut">−</button>
+        <button id="zoomIn">+</button>
+      </div>
+      <span class="tc-label" id="zoomLabel" style="font-family:var(--mono);font-size:11px;color:var(--muted)">100%</span>
+      <div style="flex:1"></div>
+      <div class="tc-total">
+        Plans : <span id="blockCount">0</span> &nbsp;|&nbsp; Pourvus : <span id="coverageCount" style="color:#FFB830">0</span> &nbsp;|&nbsp; Planifié : <span id="plannedTotal">0 min</span> &nbsp;|&nbsp; Total : <span id="totalDisplay">90 min</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: detail panel -->
+  <div class="panel-right" id="detailPanel">
+    <div class="detail-header" id="detailHeader">
+      <span class="detail-type-badge" id="detailBadge">—</span>
+      <button class="detail-close" id="detailClose">✕</button>
+    </div>
+    <div class="detail-body" id="detailBody">
+      <!-- filled dynamically -->
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<!-- MODAL LOGIN -->
+<div class="modal-overlay" id="loginModal">
+  <div class="modal-box">
+    <div class="modal-title">Connexion réalisateur</div>
+    <form id="loginForm">
+      <div class="form-field">
+        <label class="form-label">Utilisateur</label>
+        <input class="form-input" id="loginUser" type="text" autocomplete="username" placeholder="nom d'utilisateur">
+      </div>
+      <div class="form-field">
+        <label class="form-label">Mot de passe</label>
+        <input class="form-input" id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••">
+      </div>
+      <div id="loginError" style="color:#FF5E3A;font-size:12px;min-height:16px;margin-bottom:8px"></div>
+      <button class="btn btn-primary" type="submit" style="width:100%">Se connecter</button>
+    </form>
+  </div>
+</div>
+
+<!-- MODAL PROJETS -->
+<div class="modal-overlay" id="projectModal">
+  <div class="modal-box">
+    <div class="modal-title">Projets</div>
+    <div id="projectList" style="margin-bottom:16px"></div>
+    <div style="border-top:1px solid var(--border);padding-top:14px">
+      <div class="form-field">
+        <label class="form-label">Nouveau projet</label>
+        <input class="form-input" id="newProjectLabel" placeholder="Nom du projet...">
+      </div>
+      <button class="btn btn-primary btn-sm" id="createProjectBtn" style="width:100%">Créer</button>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="modalLogoutBtn"
+      style="width:100%;margin-top:10px;color:var(--muted)">Se déconnecter</button>
+  </div>
+</div>
+
+<script src="app/views/script_editor.js"></script>
+</body>
+</html>
