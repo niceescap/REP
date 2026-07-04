@@ -403,7 +403,9 @@ function drawRuler() {
 function renderTimeline() {
   const track = document.getElementById('timelineTrack');
   const empty = document.getElementById('emptyState');
-  const trackWidth = Math.max(600, 800 * zoom);
+  // trackWidth relatif au viewport pour éviter le scroll forcé sur mobile.
+  // On garde un minimum de 320px (taille iPhone SE) et on laisse le zoom agir.
+  const trackWidth = Math.max(320, Math.min(window.innerWidth * 1.2, 800 * zoom));
 
   [...track.querySelectorAll('.block')].forEach(el => el.remove());
 
