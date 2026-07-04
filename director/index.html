@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Rush Event Pilot — Nouveau projet</title>
+  <title>Rush Event Pilot — Timeline</title>
   <link rel="stylesheet" href="app/styles/main.css">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 </head>
@@ -23,7 +23,7 @@
     Projets
   </button>
 
-  <input class="project-name-input" id="projectName" placeholder="Nom du projet..." value="Conférence Tech — 14 juin 2025">
+  <input class="project-name-input" id="projectName" placeholder="Nom du projet..." value="Sans titre">
 
   <div class="topbar-right">
     <div class="total-duration-wrap" title="Durée totale du projet (en minutes)">
@@ -59,15 +59,15 @@
       <div class="panel-section-title">Informations</div>
       <div class="form-field">
         <label class="form-label">Description</label>
-        <textarea class="form-input form-textarea" placeholder="Contexte de l'événement..."></textarea>
+        <textarea class="form-input form-textarea" id="projectDesc" placeholder="Contexte de l'événement..."></textarea>
       </div>
       <div class="form-field">
         <label class="form-label">Lieu</label>
-        <input class="form-input" type="text" placeholder="Paris, salle A">
+        <input class="form-input" type="text" id="projectLocation" placeholder="Paris, salle A">
       </div>
       <div class="form-field">
         <label class="form-label">Date</label>
-        <input class="form-input" type="date" value="2025-06-14">
+        <input class="form-input" type="date" id="projectDate" value="2025-06-14">
       </div>
     </div>
 
@@ -121,8 +121,13 @@
     <div class="timeline-scroll" id="timelineScroll">
       <div class="timeline-track" id="timelineTrack">
         <div class="timeline-empty" id="emptyState">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-          Ajoutez des plans pour construire votre timeline
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>Aucun plan dans la timeline</span>
+          <button class="btn btn-primary btn-sm" id="emptyAddBlockBtn">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Ajouter un premier plan
+          </button>
+          <span style="font-size:11px;color:var(--muted)">ou importez un fichier Markdown</span>
         </div>
       </div>
     </div>
@@ -179,7 +184,10 @@
 <!-- MODAL PROJETS -->
 <div class="modal-overlay" id="projectModal">
   <div class="modal-box">
-    <div class="modal-title">Projets</div>
+    <div class="modal-header">
+      <div class="modal-title">Projets</div>
+      <button class="modal-close" id="projectModalClose">✕</button>
+    </div>
     <div id="projectList" style="margin-bottom:16px"></div>
     <div style="border-top:1px solid var(--border);padding-top:14px">
       <div class="form-field">
