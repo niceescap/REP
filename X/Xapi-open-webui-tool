@@ -1,1 +1,1724 @@
+"""
+title: X Activity API
+author: Nicolas
+version: 2.4.0
+description: X Activity API v2 — abonnements, webhooks, flux temps réel, publication de posts et téléversement de médias (OAuth 1.0a ou OAuth 2.0 user-context). Identifiants saisis dans les Valves.
+requirements: requests
+"""
 
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import mimetypes
+import re
+import threading
+import time
+import urllib.parse
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+import requests
+from pydantic import BaseModel, Field
+
+
+def _e(
+    category, visibility="non précisé", scope=None, filters=("user_id",), qualifiers=()
+):
+    """Fiche descriptive d'un type d'événement."""
+    return {
+        "category": category,
+        "visibility": visibility,  # public | private | non précisé
+        "scope": scope,  # scope OAuth 2.0 requis (événements privés)
+        "filters": list(filters),
+        "qualifiers": list(qualifiers),
+    }
+
+
+class Tools:
+    """
+    X Activity API v2 — abonnements webhook, flux d'événements temps réel,
+    publication de posts et téléversement de médias.
+    Les identifiants se renseignent dans les Valves de l'outil
+    (Workspace → Tools → ⚙️ à côté de l'outil).
+    """
+
+    # ------------------------------------------------------------------
+    # Valves (configuration administrateur)
+    # ------------------------------------------------------------------
+    class Valves(BaseModel):
+        X_ACCESS_TOKEN: str = Field(
+            default="",
+            description="Bearer token X (app-only ou user-context OAuth 2.0). "
+            "Les événements privés et le téléversement de médias exigent un token user-context "
+            "(scopes media.write / tweet.write pour publier avec image).",
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        X_CLIENT_ID: str = Field(
+            default="",
+            description="Client ID X (optionnel, envoyé en en-tête X-Client-Id).",
+        )
+        X_API_KEY: str = Field(
+            default="",
+            description="OAuth 1.0a — API Key (Consumer Key), pour publier des posts et médias.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        X_API_SECRET: str = Field(
+            default="",
+            description="OAuth 1.0a — API Secret (Consumer Secret).",
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        X_OAUTH1_ACCESS_TOKEN: str = Field(
+            default="",
+            description="OAuth 1.0a — Access Token du compte qui publie (ex. @hq_wire).",
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        X_OAUTH1_ACCESS_SECRET: str = Field(
+            default="",
+            description="OAuth 1.0a — Access Token Secret du compte qui publie.",
+            json_schema_extra={"input": {"type": "password"}},
+        )
+        X_API_BASE: str = Field(
+            default="https://api.x.com/2/activity",
+            description="Base URL de l'API X Activity.",
+        )
+        X_WEBHOOKS_BASE: str = Field(
+            default="https://api.x.com/2/webhooks",
+            description="Base URL de l'API Webhooks (pour list_webhooks).",
+        )
+        X_POSTS_BASE: str = Field(
+            default="https://api.x.com/2/tweets",
+            description="Base URL de l'API Posts (create_post / delete_post).",
+        )
+        X_MEDIA_BASE: str = Field(
+            default="https://api.x.com/2/media",
+            description="Base URL de l'API Médias (upload_media / set_media_alt_text).",
+        )
+        MAX_POST_LENGTH: int = Field(
+            default=280,
+            description="Longueur maximale d'un post (280 en standard ; augmentez pour un compte Premium).",
+        )
+        REQUEST_TIMEOUT: int = Field(
+            default=30, description="Timeout des requêtes HTTP, en secondes."
+        )
+        MAX_RETRIES: int = Field(
+            default=2,
+            description="Nouvelles tentatives sur 429/5xx (requêtes GET/PUT/DELETE uniquement).",
+        )
+        MAX_STREAM_SECONDS: int = Field(
+            default=600, description="Durée maximale d'écoute du flux, en secondes."
+        )
+        MAX_STREAM_EVENTS: int = Field(
+            default=200, description="Nombre maximal d'événements renvoyés par écoute."
+        )
+        MEDIA_CHUNK_BYTES: int = Field(
+            default=4 * 1024 * 1024,
+            description="Taille d'un segment du téléversement fragmenté (chunked), en octets.",
+        )
+        MEDIA_PROCESSING_WAIT: int = Field(
+            default=180,
+            description="Durée maximale d'attente du traitement serveur d'un média (vidéo), en secondes.",
+        )
+
+    # ------------------------------------------------------------------
+    # Catalogue des événements (d'après la documentation X Activity API)
+    # ------------------------------------------------------------------
+    EVENTS: Dict[str, Dict[str, Any]] = {
+        # Posts
+        "post.create": _e("post", "public"),
+        "post.delete": _e("post", "public"),
+        "post.mention.create": _e("post", "private", "tweet.read"),
+        "post.reply.create": _e("post", "private", "tweet.read"),
+        "post.quote.create": _e("post", "private", "tweet.read"),
+        "post.repost.create": _e("post", "private", "tweet.read"),
+        # Likes
+        "like.create": _e("like", "private", qualifiers=("direction", "post_id")),
+        # Follows
+        "follow.follow": _e("follow", qualifiers=("direction",)),
+        "follow.unfollow": _e("follow", qualifiers=("direction",)),
+        # Abonnements payants
+        "subscriptions.subscribe": _e(
+            "subscription", "private", "follows.read", qualifiers=("direction",)
+        ),
+        "subscriptions.unsubscribe": _e(
+            "subscription", "private", "follows.read", qualifiers=("direction",)
+        ),
+        # Profil
+        "profile.update.bio": _e("profile", "public"),
+        "profile.update.profile_picture": _e("profile", "public"),
+        "profile.update.banner_picture": _e("profile", "public"),
+        "profile.update.screenname": _e("profile", "public"),
+        "profile.update.handle": _e("profile", "public"),
+        "profile.update.geo": _e("profile", "public"),
+        "profile.update.url": _e("profile", "public"),
+        "profile.update.verified_badge": _e("profile"),
+        "profile.update.affiliate_badge": _e("profile"),
+        # Chat chiffré (XChat)
+        "chat.received": _e("chat", "private", qualifiers=("conversation_type",)),
+        "chat.sent": _e("chat", "private"),
+        "chat.conversation_join": _e("chat"),
+        # DM historiques
+        "dm.received": _e("dm_legacy", "private"),
+        "dm.sent": _e("dm_legacy", "private"),
+        "dm.read": _e("dm_legacy", "private"),
+        "dm.indicate_typing": _e("dm_legacy", "private"),
+        # Actualités (Enterprise / Partner uniquement)
+        "news.new": _e("news", filters=("keyword",)),
+        # Spaces
+        "spaces.start": _e("spaces"),
+        "spaces.end": _e("spaces"),
+        # Mute / Block
+        "mute.mute": _e("mute", "private", "mute.read"),
+        "mute.unmute": _e("mute", "private", "mute.read"),
+        "block.block": _e("block", "private", "block.read"),
+        "block.unblock": _e("block", "private", "block.read"),
+        # Broadcast
+        "broadcast.start": _e("broadcast", "public"),
+        "broadcast.end": _e("broadcast", "public"),
+        "broadcast.chat": _e("broadcast", "private", "broadcast.read"),
+        "broadcast.chat.remove": _e("broadcast", "private", "broadcast.read"),
+        # OAuth
+        "oauth.revoke": _e("oauth", filters=()),
+    }
+    QUALIFIER_VALUES = {
+        "direction": ("inbound", "outbound"),
+        "conversation_type": ("direct", "group"),
+        "post_id": None,  # identifiant numérique libre
+    }
+    RFC3339 = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+    )
+    DEFAULT_BASE = "https://api.x.com/2/activity"
+    USERS_ME_URL = "https://api.x.com/2/users/me"
+    DEFAULT_MEDIA_BASE = "https://api.x.com/2/media"
+
+    # ------------------------------------------------------------------
+    # Catalogue des médias (limites officielles X par catégorie)
+    # ------------------------------------------------------------------
+    MEDIA_CATEGORIES: Dict[str, Dict[str, Any]] = {
+        "tweet_image": {
+            "max_bytes": 5 * 1024 * 1024,
+            "mimes": ("image/jpeg", "image/png", "image/webp"),
+        },
+        "dm_image": {
+            "max_bytes": 5 * 1024 * 1024,
+            "mimes": ("image/jpeg", "image/png", "image/webp"),
+        },
+        "tweet_gif": {
+            "max_bytes": 15 * 1024 * 1024,
+            "mimes": ("image/gif",),
+        },
+        "dm_gif": {
+            "max_bytes": 15 * 1024 * 1024,
+            "mimes": ("image/gif",),
+        },
+        "tweet_video": {
+            "max_bytes": 512 * 1024 * 1024,
+            "mimes": ("video/mp4", "video/quicktime"),
+        },
+        "dm_video": {
+            "max_bytes": 512 * 1024 * 1024,
+            "mimes": ("video/mp4", "video/quicktime"),
+        },
+    }
+    MIME_ALIASES = {
+        "image/jpg": "image/jpeg",
+        "image/x-png": "image/png",
+        "image/pjpeg": "image/jpeg",
+        "video/mov": "video/quicktime",
+        "video/x-quicktime": "video/quicktime",
+    }
+    MIME_PATTERN = re.compile(r"^[\w.+-]+/[\w.+-]+$")
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    # ------------------------------------------------------------------
+    # Helpers privés
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dump(obj: Any) -> str:
+        return json.dumps(obj, ensure_ascii=False, indent=2)
+
+    def _base_url(self) -> str:
+        return (self.valves.X_API_BASE.strip() or self.DEFAULT_BASE).rstrip("/")
+
+    def _media_base(self) -> str:
+        return (self.valves.X_MEDIA_BASE.strip() or self.DEFAULT_MEDIA_BASE).rstrip("/")
+
+    def _headers(self) -> dict:
+        token = self.valves.X_ACCESS_TOKEN.strip()
+        if not token:
+            raise RuntimeError(
+                "X_ACCESS_TOKEN vide : renseignez-le dans les Valves de l'outil "
+                "(Workspace → Tools → ⚙️ à côté de l'outil)."
+            )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        client_id = self.valves.X_CLIENT_ID.strip()
+        if client_id:
+            headers["X-Client-Id"] = client_id
+        return headers
+
+    # --- OAuth 1.0a (publication de posts et médias) ---
+    def _oauth1_configured(self) -> bool:
+        v = self.valves
+        return all(
+            x.strip()
+            for x in (
+                v.X_API_KEY,
+                v.X_API_SECRET,
+                v.X_OAUTH1_ACCESS_TOKEN,
+                v.X_OAUTH1_ACCESS_SECRET,
+            )
+        )
+
+    def _oauth1_header(
+        self,
+        method: str,
+        url: str,
+        params: Optional[dict] = None,
+        nonce: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> str:
+        """Construit l'en-tête Authorization OAuth 1.0a (HMAC-SHA1). Corps JSON non signé, conformément à la spec."""
+        v = self.valves
+        enc = lambda x: urllib.parse.quote(str(x), safe="~")
+        oauth = {
+            "oauth_consumer_key": v.X_API_KEY.strip(),
+            "oauth_nonce": nonce or uuid.uuid4().hex,
+            "oauth_signature_method": "HMAC-SHA1",
+            "oauth_timestamp": timestamp or str(int(time.time())),
+            "oauth_token": v.X_OAUTH1_ACCESS_TOKEN.strip(),
+            "oauth_version": "1.0",
+        }
+        signed = {**(params or {}), **oauth}
+        pairs = sorted((enc(k), enc(val)) for k, val in signed.items())
+        param_str = "&".join(f"{k}={val}" for k, val in pairs)
+        base = "&".join([method.upper(), enc(url), enc(param_str)])
+        key = f"{enc(v.X_API_SECRET.strip())}&{enc(v.X_OAUTH1_ACCESS_SECRET.strip())}"
+        oauth["oauth_signature"] = base64.b64encode(
+            hmac.new(key.encode(), base.encode(), hashlib.sha1).digest()
+        ).decode()
+        return "OAuth " + ", ".join(
+            f'{enc(k)}="{enc(val)}"' for k, val in sorted(oauth.items())
+        )
+
+    def _auth_headers(
+        self, method: str, url: str, params: Optional[dict], auth: str
+    ) -> dict:
+        if auth == "oauth1":
+            if not self._oauth1_configured():
+                raise RuntimeError(
+                    "Identifiants OAuth 1.0a incomplets : renseignez X_API_KEY, X_API_SECRET, "
+                    "X_OAUTH1_ACCESS_TOKEN et X_OAUTH1_ACCESS_SECRET dans les Valves."
+                )
+            return {
+                "Authorization": self._oauth1_header(method, url, params),
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+        return self._headers()
+
+    def _post_auth_mode(self) -> str:
+        """OAuth 1.0a si les 4 clés sont renseignées, sinon Bearer user-context (OAuth 2.0)."""
+        return "oauth1" if self._oauth1_configured() else "bearer"
+
+    def _validate_event_type(self, event_type: str) -> None:
+        if event_type not in self.EVENTS:
+            raise ValueError(
+                f"event_type inconnu '{event_type}'. Appelez list_event_types pour la liste."
+            )
+
+    def _check_expires_at(self, value: str) -> str:
+        value = value.strip()
+        if not self.RFC3339.match(value):
+            raise ValueError(
+                "expires_at doit être au format RFC 3339, ex : 2026-12-31T23:59:59Z."
+            )
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("expires_at illisible : vérifiez la date et l'heure.")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt <= datetime.now(timezone.utc):
+            raise ValueError("expires_at est dans le passé.")
+        return value
+
+    @staticmethod
+    def _status_hint(status: int) -> Optional[str]:
+        hints = {
+            400: "Requête invalide : vérifiez event_type, filtres et qualifiers.",
+            401: "Token invalide ou expiré : vérifiez X_ACCESS_TOKEN dans les Valves.",
+            403: "Accès refusé : scope OAuth manquant, événement privé non autorisé par "
+            "l'utilisateur, ou palier du compte insuffisant (ex. news.new = Enterprise/Partner).",
+            404: "Ressource introuvable : vérifiez l'identifiant.",
+            429: "Limite de débit atteinte : réessayez après l'heure indiquée dans rate_limit.reset_at.",
+        }
+        if status >= 500:
+            return "Erreur côté X : réessayez plus tard."
+        return hints.get(status)
+
+    @staticmethod
+    def _event_notice(event_type: str, meta: Dict[str, Any]) -> Optional[str]:
+        if meta["visibility"] == "private":
+            scope = f" (scope requis : {meta['scope']})" if meta["scope"] else ""
+            return (
+                f"{event_type} est un événement privé : il exige un token user-context "
+                f"OAuth 2.0 de l'utilisateur suivi{scope}."
+            )
+        if event_type == "news.new":
+            return "news.new est réservé aux comptes Enterprise et Partner."
+        return None
+
+    def _call(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        json_body: Optional[dict] = None,
+        base: Optional[str] = None,
+        auth: str = "bearer",
+    ) -> Dict[str, Any]:
+        """Exécute la requête HTTP (avec retries sur 429/5xx hors POST) et renvoie un dict."""
+        url = f"{base or self._base_url()}{path}"
+        retries = max(0, int(self.valves.MAX_RETRIES)) if method != "POST" else 0
+        attempt = 0
+        while True:
+            try:
+                resp = requests.request(
+                    method,
+                    url,
+                    headers=self._auth_headers(method, url, params, auth),
+                    params=params,
+                    json=json_body,
+                    timeout=self.valves.REQUEST_TIMEOUT,
+                )
+            except RuntimeError as e:
+                return {"ok": False, "error": str(e)}
+            except requests.RequestException as e:
+                if attempt < retries:
+                    attempt += 1
+                    time.sleep(min(2**attempt, 8))
+                    continue
+                return {"ok": False, "error": f"Erreur réseau : {e}"}
+
+            rate_limit = {}
+            remaining = resp.headers.get("x-rate-limit-remaining")
+            reset = resp.headers.get("x-rate-limit-reset")
+            if remaining is not None:
+                rate_limit["remaining"] = remaining
+            if reset and reset.isdigit():
+                rate_limit["reset_at"] = datetime.fromtimestamp(
+                    int(reset), tz=timezone.utc
+                ).isoformat()
+
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                wait = min(2 ** (attempt + 1), 8)
+                if resp.status_code == 429 and reset and reset.isdigit():
+                    wait = int(reset) - int(time.time())
+                if 0 <= wait <= 10:
+                    attempt += 1
+                    time.sleep(wait)
+                    continue
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {"raw": resp.text[:2000]}
+
+            ok = resp.status_code < 400
+            result: Dict[str, Any] = {
+                "ok": ok,
+                "status_code": resp.status_code,
+                "data": payload,
+            }
+            if rate_limit:
+                result["rate_limit"] = rate_limit
+            if not ok:
+                if isinstance(payload, dict) and payload.get("errors"):
+                    result["errors"] = payload["errors"]
+                hint = self._status_hint(resp.status_code)
+                if hint:
+                    result["hint"] = hint
+            return result
+
+    @staticmethod
+    def _extract_items(payload: Any) -> List[dict]:
+        """Extrait la liste d'abonnements d'une réponse, quelle que soit sa forme."""
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            for key in ("subscriptions", "data"):
+                if isinstance(data.get(key), list):
+                    return [x for x in data[key] if isinstance(x, dict)]
+        return []
+
+    @staticmethod
+    def _sub_id(item: dict) -> Optional[str]:
+        value = item.get("subscription_id") or item.get("id")
+        return str(value) if value is not None else None
+
+    def _fetch_subscriptions(self) -> Dict[str, Any]:
+        res = self._call("GET", "/subscriptions")
+        if res.get("ok"):
+            res["items"] = self._extract_items(res["data"])
+        return res
+
+    def _build_subscription_body(
+        self,
+        event_type: str,
+        user_id: Optional[str],
+        keyword: Optional[str],
+        webhook_id: Optional[str],
+        tag: Optional[str],
+        expires_at: Optional[str],
+        qualifiers: Dict[str, Optional[str]],
+    ) -> Dict[str, Any]:
+        self._validate_event_type(event_type)
+        meta = self.EVENTS[event_type]
+
+        flt: Dict[str, Any] = {}
+        if "user_id" in meta["filters"]:
+            if not user_id or not user_id.strip().isdigit():
+                raise ValueError(
+                    f"{event_type} exige user_id (identifiant numérique de l'utilisateur X)."
+                )
+            flt["user_id"] = user_id.strip()
+        if "keyword" in meta["filters"]:
+            if not keyword or not keyword.strip():
+                raise ValueError(f"{event_type} exige un keyword.")
+            flt["keyword"] = keyword.strip()
+
+        clean = {k: v.strip() for k, v in qualifiers.items() if v and v.strip()}
+        for key, value in clean.items():
+            if key not in meta["qualifiers"]:
+                supported = ", ".join(meta["qualifiers"]) or "aucun"
+                raise ValueError(
+                    f"Le qualifier '{key}' n'est pas supporté par {event_type} (supportés : {supported})."
+                )
+            allowed = self.QUALIFIER_VALUES.get(key)
+            if allowed is not None and value not in allowed:
+                raise ValueError(
+                    f"Valeur '{value}' invalide pour '{key}' (attendu : {', '.join(allowed)})."
+                )
+            if key == "post_id" and not value.isdigit():
+                raise ValueError("post_id doit être un identifiant numérique de Post.")
+        if clean:
+            flt["qualifiers"] = clean
+
+        body: Dict[str, Any] = {"event_type": event_type}
+        if flt:
+            body["filter"] = flt
+        if webhook_id:
+            body["webhook_id"] = (
+                webhook_id.strip()
+            )  # absent = livraison par le flux persistant
+        if tag:
+            body["tag"] = tag
+        if expires_at:
+            body["expires_at"] = self._check_expires_at(expires_at)
+        return body
+
+    # ------------------------------------------------------------------
+    # Outils publics — catalogue
+    # ------------------------------------------------------------------
+    def list_event_types(self, category: Optional[str] = None) -> str:
+        """
+        Liste les types d'événements supportés, avec leur visibilité (public/privé),
+        le scope OAuth requis, les filtres et les qualifiers acceptés.
+        :param category: Catégorie à afficher (post, like, follow, subscription, profile, chat, dm_legacy, news, spaces, mute, block, broadcast, oauth). Vide = toutes.
+        """
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for name, meta in self.EVENTS.items():
+            if category and meta["category"] != category:
+                continue
+            grouped.setdefault(meta["category"], {})[name] = {
+                k: v for k, v in meta.items() if k != "category" and v not in (None, [])
+            }
+        if not grouped:
+            cats = sorted({m["category"] for m in self.EVENTS.values()})
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": f"Catégorie inconnue. Disponibles : {', '.join(cats)}",
+                }
+            )
+        return self._dump(grouped)
+
+    # ------------------------------------------------------------------
+    # Outils publics — abonnements
+    # ------------------------------------------------------------------
+    def create_subscription(
+        self,
+        event_type: str,
+        user_id: Optional[str] = None,
+        keyword: Optional[str] = None,
+        webhook_id: Optional[str] = None,
+        tag: Optional[str] = None,
+        expires_at: Optional[str] = None,
+        direction: Optional[str] = None,
+        conversation_type: Optional[str] = None,
+        post_id: Optional[str] = None,
+    ) -> str:
+        """
+        Crée un abonnement d'activité (POST /2/activity/subscriptions).
+        Sans webhook_id, les événements sont livrés par le flux persistant (connect_stream).
+        Un nouveau POST identique avec un autre expires_at rafraîchit l'expiration.
+        :param event_type: Type d'événement (ex : post.create, like.create, news.new). Voir list_event_types.
+        :param user_id: ID numérique de l'utilisateur X suivi (requis sauf pour news.new et oauth.revoke).
+        :param keyword: Mot-clé (requis uniquement pour news.new).
+        :param webhook_id: Webhook de destination (optionnel ; absent = flux persistant).
+        :param tag: Étiquette libre pour retrouver l'abonnement.
+        :param expires_at: Expiration RFC 3339, ex : 2026-12-31T23:59:59Z.
+        :param direction: Qualifier inbound ou outbound (like.create, follow.*, subscriptions.*).
+        :param conversation_type: Qualifier direct ou group (chat.received uniquement).
+        :param post_id: Qualifier : ID d'un Post précis (like.create uniquement).
+        """
+        try:
+            body = self._build_subscription_body(
+                event_type,
+                user_id,
+                keyword,
+                webhook_id,
+                tag,
+                expires_at,
+                {
+                    "direction": direction,
+                    "conversation_type": conversation_type,
+                    "post_id": post_id,
+                },
+            )
+        except ValueError as e:
+            return self._dump({"ok": False, "error": str(e)})
+        result = self._call("POST", "/subscriptions", json_body=body)
+        notice = self._event_notice(event_type, self.EVENTS[event_type])
+        if notice:
+            result["notice"] = notice
+        return self._dump(result)
+
+    def create_subscriptions_bulk(
+        self,
+        event_types: str,
+        user_id: str,
+        webhook_id: Optional[str] = None,
+        tag: Optional[str] = None,
+        expires_at: Optional[str] = None,
+    ) -> str:
+        """
+        Crée plusieurs abonnements d'un coup pour un même utilisateur (25 événements max).
+        :param event_types: Types d'événements séparés par des virgules, ex : "post.create,post.delete,profile.update.bio".
+        :param user_id: ID numérique de l'utilisateur X suivi.
+        :param webhook_id: Webhook de destination (optionnel ; absent = flux persistant).
+        :param tag: Étiquette commune aux abonnements.
+        :param expires_at: Expiration RFC 3339 commune.
+        """
+        names = [n.strip() for n in event_types.split(",") if n.strip()]
+        if not names:
+            return self._dump({"ok": False, "error": "Aucun event_type fourni."})
+        if len(names) > 25:
+            return self._dump(
+                {"ok": False, "error": "25 événements maximum par appel."}
+            )
+
+        results = []
+        for name in dict.fromkeys(names):  # dédoublonne en gardant l'ordre
+            try:
+                body = self._build_subscription_body(
+                    name, user_id, None, webhook_id, tag, expires_at, {}
+                )
+            except ValueError as e:
+                results.append({"event_type": name, "ok": False, "error": str(e)})
+                continue
+            res = self._call("POST", "/subscriptions", json_body=body)
+            entry = {
+                "event_type": name,
+                "ok": res.get("ok", False),
+                "status_code": res.get("status_code"),
+            }
+            entry["data" if res.get("ok") else "error"] = (
+                res.get("data")
+                if res.get("ok")
+                else res.get("errors")
+                or res.get("error")
+                or res.get("hint")
+                or res.get("data")
+            )
+            notice = self._event_notice(name, self.EVENTS[name])
+            if notice and not res.get("ok"):
+                entry["notice"] = notice
+            results.append(entry)
+
+        success = sum(1 for r in results if r["ok"])
+        return self._dump(
+            {
+                "ok": success == len(results),
+                "created": success,
+                "total": len(results),
+                "results": results,
+            }
+        )
+
+    def list_subscriptions(
+        self, event_type: Optional[str] = None, tag: Optional[str] = None
+    ) -> str:
+        """
+        Liste les abonnements actifs (GET /2/activity/subscriptions), avec filtrage optionnel.
+        :param event_type: Ne garder que ce type d'événement.
+        :param tag: Ne garder que les abonnements portant cette étiquette.
+        """
+        res = self._fetch_subscriptions()
+        if not res.get("ok"):
+            res.pop("items", None)
+            return self._dump(res)
+        items = res["items"]
+        if event_type:
+            items = [i for i in items if i.get("event_type") == event_type]
+        if tag:
+            items = [i for i in items if i.get("tag") == tag]
+        out = {
+            "ok": True,
+            "status_code": res["status_code"],
+            "count": len(items),
+            "subscriptions": items,
+        }
+        if "rate_limit" in res:
+            out["rate_limit"] = res["rate_limit"]
+        return self._dump(out)
+
+    def update_subscription(
+        self,
+        subscription_id: str,
+        tag: Optional[str] = None,
+        webhook_id: Optional[str] = None,
+    ) -> str:
+        """
+        Met à jour l'étiquette et/ou le webhook d'un abonnement (PUT /2/activity/subscriptions/:id).
+        L'expiration ne se change pas ici : utilisez refresh_subscription_expiration.
+        :param subscription_id: Identifiant de l'abonnement.
+        :param tag: Nouvelle étiquette.
+        :param webhook_id: Nouveau webhook de destination.
+        """
+        body = {}
+        if tag is not None:
+            body["tag"] = tag
+        if webhook_id is not None:
+            body["webhook_id"] = webhook_id
+        if not body:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": "Rien à mettre à jour : fournissez tag et/ou webhook_id.",
+                }
+            )
+        return self._dump(
+            self._call("PUT", f"/subscriptions/{subscription_id}", json_body=body)
+        )
+
+    def refresh_subscription_expiration(
+        self, subscription_id: str, expires_at: str
+    ) -> str:
+        """
+        Change la date d'expiration d'un abonnement existant en le re-postant à l'identique
+        avec un nouvel expires_at (seule méthode prévue par l'API).
+        :param subscription_id: Identifiant de l'abonnement.
+        :param expires_at: Nouvelle expiration RFC 3339, ex : 2027-01-31T23:59:59Z.
+        """
+        try:
+            new_expiry = self._check_expires_at(expires_at)
+        except ValueError as e:
+            return self._dump({"ok": False, "error": str(e)})
+
+        res = self._fetch_subscriptions()
+        if not res.get("ok"):
+            res.pop("items", None)
+            return self._dump(res)
+        current = next(
+            (i for i in res["items"] if self._sub_id(i) == str(subscription_id)), None
+        )
+        if not current:
+            return self._dump(
+                {"ok": False, "error": f"Abonnement '{subscription_id}' introuvable."}
+            )
+        if not current.get("event_type"):
+            return self._dump(
+                {"ok": False, "error": "Abonnement illisible : event_type manquant."}
+            )
+
+        body: Dict[str, Any] = {
+            "event_type": current["event_type"],
+            "expires_at": new_expiry,
+        }
+        if current.get("filter"):
+            body["filter"] = current["filter"]
+        if current.get("webhook_id"):
+            body["webhook_id"] = current["webhook_id"]
+        if current.get("tag"):
+            body["tag"] = current["tag"]
+        return self._dump(self._call("POST", "/subscriptions", json_body=body))
+
+    def delete_subscription(self, subscription_id: str) -> str:
+        """
+        Supprime un abonnement (DELETE /2/activity/subscriptions/:id).
+        :param subscription_id: Identifiant de l'abonnement à supprimer.
+        """
+        return self._dump(self._call("DELETE", f"/subscriptions/{subscription_id}"))
+
+    def delete_subscriptions_by_tag(self, tag: str, confirm: bool = False) -> str:
+        """
+        Supprime tous les abonnements portant une étiquette. Sans confirm=true, renvoie seulement un aperçu.
+        :param tag: Étiquette des abonnements à supprimer.
+        :param confirm: Mettre true pour exécuter réellement la suppression.
+        """
+        res = self._fetch_subscriptions()
+        if not res.get("ok"):
+            res.pop("items", None)
+            return self._dump(res)
+        targets = [i for i in res["items"] if i.get("tag") == tag]
+        if not targets:
+            return self._dump(
+                {
+                    "ok": True,
+                    "deleted": 0,
+                    "message": f"Aucun abonnement avec l'étiquette '{tag}'.",
+                }
+            )
+        if not confirm:
+            return self._dump(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "would_delete": len(targets),
+                    "subscriptions": targets,
+                    "message": "Aperçu seulement. Relancez avec confirm=true pour supprimer.",
+                }
+            )
+        results = []
+        for item in targets:
+            sid = self._sub_id(item)
+            if not sid:
+                results.append(
+                    {"ok": False, "error": "identifiant manquant", "subscription": item}
+                )
+                continue
+            r = self._call("DELETE", f"/subscriptions/{sid}")
+            results.append(
+                {
+                    "subscription_id": sid,
+                    "ok": r.get("ok", False),
+                    "status_code": r.get("status_code"),
+                }
+            )
+        deleted = sum(1 for r in results if r["ok"])
+        return self._dump(
+            {
+                "ok": deleted == len(results),
+                "deleted": deleted,
+                "total": len(results),
+                "results": results,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Outils publics — webhooks
+    # ------------------------------------------------------------------
+    def list_webhooks(self) -> str:
+        """Liste les webhooks enregistrés pour l'application (utile pour retrouver un webhook_id)."""
+        return self._dump(
+            self._call("GET", "", base=self.valves.X_WEBHOOKS_BASE.strip().rstrip("/"))
+        )
+
+    # ------------------------------------------------------------------
+    # Outils publics — publication de posts
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _post_length(text: str) -> int:
+        """Longueur pondérée façon X : caractères latins = 1, autres (emoji, CJK…) = 2. URLs non comptées à 23."""
+        latin = ((0, 4351), (8192, 8205), (8208, 8223), (8242, 8247))
+        return sum(1 if any(a <= ord(c) <= b for a, b in latin) else 2 for c in text)
+
+    def _post_failure_notice(self, result: Dict[str, Any]) -> None:
+        if not result.get("ok") and result.get("status_code") in (401, 403):
+            result["notice"] = (
+                "Publier ou supprimer un post exige un contexte utilisateur : soit les 4 clés "
+                "OAuth 1.0a dans les Valves (X_API_KEY, X_API_SECRET, X_OAUTH1_ACCESS_TOKEN, "
+                "X_OAUTH1_ACCESS_SECRET), soit un token OAuth 2.0 user-context (tweet.read, "
+                "tweet.write, users.read) dans X_ACCESS_TOKEN. Un token app-only ne peut pas publier. "
+                f"Mode utilisé : {'OAuth 1.0a' if self._oauth1_configured() else 'Bearer'}."
+            )
+
+    def create_post(
+        self,
+        text: str,
+        reply_to_post_id: Optional[str] = None,
+        quote_post_id: Optional[str] = None,
+        media_ids: Optional[str] = None,
+        confirm: bool = False,
+    ) -> str:
+        """
+        Publie un post sur X (POST /2/tweets). Action publique et visible : sans confirm=true,
+        renvoie seulement un aperçu (longueur, corps de la requête) et ne publie rien.
+        :param text: Texte du post.
+        :param reply_to_post_id: ID d'un Post auquel répondre (optionnel).
+        :param quote_post_id: ID d'un Post à citer (optionnel).
+        :param media_ids: IDs de médias déjà téléversés avec upload_media (champ media_id de sa réponse), séparés par des virgules (optionnel).
+        :param confirm: Mettre true pour publier réellement.
+        """
+        text = (text or "").strip()
+        ids = [m.strip() for m in (media_ids or "").split(",") if m.strip()]
+        if not text and not ids:
+            return self._dump(
+                {"ok": False, "error": "Fournissez un texte ou des media_ids."}
+            )
+
+        length = self._post_length(text)
+        limit = int(self.valves.MAX_POST_LENGTH)
+        if length > limit:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": f"Post trop long : {length} caractères pondérés pour {limit} autorisés.",
+                }
+            )
+        for label, value in (
+            ("reply_to_post_id", reply_to_post_id),
+            ("quote_post_id", quote_post_id),
+        ):
+            if value and not value.strip().isdigit():
+                return self._dump(
+                    {
+                        "ok": False,
+                        "error": f"{label} doit être un identifiant numérique.",
+                    }
+                )
+        if ids and not all(i.isdigit() for i in ids):
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": "media_ids doit contenir des identifiants numériques.",
+                }
+            )
+        if len(ids) > 4:
+            return self._dump({"ok": False, "error": "4 médias maximum par post."})
+
+        body: Dict[str, Any] = {}
+        if text:
+            body["text"] = text
+        if reply_to_post_id:
+            body["reply"] = {"in_reply_to_tweet_id": reply_to_post_id.strip()}
+        if quote_post_id:
+            body["quote_tweet_id"] = quote_post_id.strip()
+        if ids:
+            body["media"] = {"media_ids": ids}
+
+        if not confirm:
+            return self._dump(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "weighted_length": f"{length}/{limit} (hors URLs, comptées 23 par X)",
+                    "request_body": body,
+                    "message": "Aperçu seulement. Relancez avec confirm=true pour publier.",
+                }
+            )
+
+        result = self._call(
+            "POST",
+            "",
+            json_body=body,
+            base=self.valves.X_POSTS_BASE.strip().rstrip("/"),
+            auth=self._post_auth_mode(),
+        )
+        if result.get("ok"):
+            data = result.get("data")
+            post_id = (
+                data.get("data", {}).get("id")
+                if isinstance(data, dict) and isinstance(data.get("data"), dict)
+                else None
+            )
+            if post_id:
+                result["url"] = f"https://x.com/i/status/{post_id}"
+        self._post_failure_notice(result)
+        return self._dump(result)
+
+    def delete_post(self, post_id: str, confirm: bool = False) -> str:
+        """
+        Supprime un de vos posts (DELETE /2/tweets/:id). Sans confirm=true, renvoie seulement un aperçu.
+        :param post_id: ID numérique du Post à supprimer.
+        :param confirm: Mettre true pour supprimer réellement.
+        """
+        post_id = (post_id or "").strip()
+        if not post_id.isdigit():
+            return self._dump(
+                {"ok": False, "error": "post_id doit être un identifiant numérique."}
+            )
+        if not confirm:
+            return self._dump(
+                {
+                    "ok": True,
+                    "preview": True,
+                    "message": f"Le post {post_id} serait supprimé. Relancez avec confirm=true pour confirmer.",
+                }
+            )
+        result = self._call(
+            "DELETE",
+            f"/{post_id}",
+            base=self.valves.X_POSTS_BASE.strip().rstrip("/"),
+            auth=self._post_auth_mode(),
+        )
+        self._post_failure_notice(result)
+        return self._dump(result)
+
+    def verify_credentials(self) -> str:
+        """
+        Vérifie les identifiants de publication sans rien publier : renvoie le compte X (@handle)
+        associé aux clés, et le mode d'authentification utilisé (OAuth 1.0a ou Bearer).
+        À lancer avant le premier post pour confirmer que les clés sont bien celles de @hq_wire.
+        """
+        mode = self._post_auth_mode()
+        result = self._call("GET", "", base=self.USERS_ME_URL, auth=mode)
+        result["auth_mode"] = (
+            "OAuth 1.0a" if mode == "oauth1" else "Bearer (X_ACCESS_TOKEN)"
+        )
+        data = result.get("data")
+        user = data.get("data") if isinstance(data, dict) else None
+        if result.get("ok") and isinstance(user, dict) and user.get("username"):
+            result["account"] = f"@{user['username']}"
+        elif not result.get("ok"):
+            result["notice"] = (
+                "Échec de la vérification. Si le statut est 401 : clés incorrectes ou mal copiées. "
+                "Si 403 : app non autorisée, ou token app-only (incapable de publier)."
+            )
+        return self._dump(result)
+
+    # ------------------------------------------------------------------
+    # Outils publics — téléversement de médias (API v2)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _human_size(n: int) -> str:
+        if n >= 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f} Mo"
+        if n >= 1024:
+            return f"{n / 1024:.1f} Ko"
+        return f"{n} o"
+
+    @staticmethod
+    def _sniff_mime(data: bytes, hint: Optional[str]) -> Optional[str]:
+        """Détecte le type MIME par signature binaire (prioritaire), puis depuis un indice (mime ou nom de fichier)."""
+        if data.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return "image/gif"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+        if len(data) >= 12 and data[4:8] == b"ftyp":
+            return "video/quicktime" if data[8:12] == b"qt  " else "video/mp4"
+        if hint:
+            hint = hint.strip()
+            head = hint.split(";")[0].strip().lower()
+            if Tools.MIME_PATTERN.match(head):
+                return head
+            by_name, _ = mimetypes.guess_type(hint)
+            if by_name:
+                return by_name
+        return None
+
+    def _resolve_media(self, media_source: str):
+        """
+        Charge le média depuis une source : chemin de fichier local, URL http(s),
+        'base64:…' ou data URI 'data:<mime>;base64,…'.
+        Renvoie (octets, indice de type MIME, type de source).
+        """
+        src = (media_source or "").strip()
+        if not src:
+            raise ValueError("media_source est vide.")
+
+        if src.startswith("data:"):
+            head, sep, payload = src.partition(",")
+            if not sep or ";base64" not in head:
+                raise ValueError(
+                    "data URI non supporté : seul le format base64 est accepté "
+                    "(data:<mime>;base64,…)."
+                )
+            try:
+                data = base64.b64decode(re.sub(r"\s+", "", payload), validate=True)
+            except (ValueError, TypeError):
+                raise ValueError("data URI illisible : contenu base64 invalide.")
+            return data, head[5:].split(";")[0].strip() or None, "data_uri"
+
+        if src.startswith("base64:"):
+            try:
+                data = base64.b64decode(
+                    re.sub(r"\s+", "", src[7:]), validate=True
+                )
+            except (ValueError, TypeError):
+                raise ValueError("base64 illisible : contenu invalide.")
+            return data, None, "base64"
+
+        if src.startswith("http://") or src.startswith("https://"):
+            try:
+                resp = requests.get(src, timeout=self.valves.REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                raise ValueError(f"Téléchargement impossible : {e}")
+            if resp.status_code >= 400:
+                raise ValueError(
+                    f"Téléchargement impossible : HTTP {resp.status_code} pour {src}."
+                )
+            ctype = (resp.headers.get("content-type") or "").split(";")[0].strip()
+            return resp.content, ctype or None, "url"
+
+        try:
+            with open(src, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise ValueError(f"Fichier illisible : {e}")
+        return data, src, "file"
+
+    def _media_auth_headers(
+        self, method: str, url: str, params: Optional[dict], json_body: Optional[dict]
+    ) -> dict:
+        """
+        En-têtes d'authentification pour les endpoints médias.
+        OAuth 1.0a : signature des paramètres de requête uniquement
+        (le corps multipart/JSON n'est jamais signé, conformément à la spec).
+        """
+        if self._post_auth_mode() == "oauth1":
+            if not self._oauth1_configured():
+                raise RuntimeError(
+                    "Identifiants OAuth 1.0a incomplets : renseignez X_API_KEY, X_API_SECRET, "
+                    "X_OAUTH1_ACCESS_TOKEN et X_OAUTH1_ACCESS_SECRET dans les Valves."
+                )
+            headers = {
+                "Authorization": self._oauth1_header(method, url, params),
+                "Accept": "application/json",
+            }
+        else:
+            token = self.valves.X_ACCESS_TOKEN.strip()
+            if not token:
+                raise RuntimeError(
+                    "X_ACCESS_TOKEN vide : renseignez-le dans les Valves de l'outil "
+                    "(Workspace → Tools → ⚙️ à côté de l'outil)."
+                )
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/json",
+            }
+            client_id = self.valves.X_CLIENT_ID.strip()
+            if client_id:
+                headers["X-Client-Id"] = client_id
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
+        # En multipart, requests pose lui-même Content-Type avec la frontière : ne pas le forcer.
+        return headers
+
+    @staticmethod
+    def _media_status_hint(status: int) -> Optional[str]:
+        hints = {
+            400: "Requête invalide : vérifiez media_category, media_type et total_bytes.",
+            401: "Authentification refusée : vérifiez les clés dans les Valves.",
+            403: "Accès refusé : scope media.write manquant (OAuth 2.0), application non "
+            "autorisée à téléverser, ou compte sans droits sur ce média.",
+            404: "Média ou ressource introuvable : vérifiez l'identifiant.",
+            413: "Fichier trop volumineux pour la limite de X (voir la limite de la catégorie).",
+            429: "Limite de débit atteinte : réessayez plus tard.",
+        }
+        if status >= 500:
+            return "Erreur côté X : réessayez plus tard."
+        return hints.get(status)
+
+    def _media_failure_notice(self, result: Dict[str, Any]) -> None:
+        if not result.get("ok") and result.get("status_code") in (401, 403):
+            result["notice"] = (
+                "Téléverser un média exige un contexte utilisateur avec le scope media.write : "
+                "soit les 4 clés OAuth 1.0a dans les Valves (X_API_KEY, X_API_SECRET, "
+                "X_OAUTH1_ACCESS_TOKEN, X_OAUTH1_ACCESS_SECRET), soit un token OAuth 2.0 "
+                "user-context (media.write, tweet.write) dans X_ACCESS_TOKEN. Un token app-only "
+                f"ne suffit pas. Mode utilisé : {'OAuth 1.0a' if self._oauth1_configured() else 'Bearer'}."
+            )
+
+    def _media_call(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict] = None,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None,
+        json_body: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        """Exécute une requête vers l'API Médias (retries sur 429/5xx pour les GET uniquement)."""
+        url = f"{self._media_base()}{path}"
+        method = method.upper()
+        retries = max(0, int(self.valves.MAX_RETRIES)) if method == "GET" else 0
+        attempt = 0
+        while True:
+            try:
+                headers = self._media_auth_headers(method, url, params, json_body)
+            except RuntimeError as e:
+                return {"ok": False, "error": str(e)}
+            try:
+                resp = requests.request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    data=data,
+                    files=files,
+                    json=json_body,
+                    timeout=(10, max(int(self.valves.REQUEST_TIMEOUT), 120)),
+                )
+            except requests.RequestException as e:
+                if attempt < retries:
+                    attempt += 1
+                    time.sleep(min(2**attempt, 8))
+                    continue
+                return {"ok": False, "error": f"Erreur réseau : {e}"}
+
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                attempt += 1
+                time.sleep(min(2**attempt, 8))
+                continue
+
+            rate_limit = {}
+            remaining = resp.headers.get("x-rate-limit-remaining")
+            reset = resp.headers.get("x-rate-limit-reset")
+            if remaining is not None:
+                rate_limit["remaining"] = remaining
+            if reset and reset.isdigit():
+                rate_limit["reset_at"] = datetime.fromtimestamp(
+                    int(reset), tz=timezone.utc
+                ).isoformat()
+
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {"raw": resp.text[:2000]}
+
+            ok = resp.status_code < 400
+            result: Dict[str, Any] = {
+                "ok": ok,
+                "status_code": resp.status_code,
+                "data": payload,
+            }
+            if rate_limit:
+                result["rate_limit"] = rate_limit
+            if not ok:
+                if isinstance(payload, dict) and payload.get("errors"):
+                    result["errors"] = payload["errors"]
+                hint = self._media_status_hint(resp.status_code)
+                if hint:
+                    result["hint"] = hint
+            return result
+
+    def _upload_simple(
+        self,
+        data: bytes,
+        mime_type: str,
+        media_category: str,
+        additional_owners: Optional[str],
+    ) -> Dict[str, Any]:
+        """Téléversement simple (one-shot, multipart) pour les petits médias."""
+        form: Dict[str, str] = {
+            "media_category": media_category,
+            "media_type": mime_type,
+        }
+        if additional_owners:
+            form["additional_owners"] = additional_owners
+        files = {"media": ("media", data, mime_type)}
+        result = self._media_call("POST", "/upload", data=form, files=files)
+        if result.get("ok"):
+            result["upload_mode"] = "simple"
+        return result
+
+    def _upload_chunked(
+        self,
+        data: bytes,
+        mime_type: str,
+        media_category: str,
+        additional_owners: Optional[str],
+    ) -> Dict[str, Any]:
+        """Téléversement fragmenté : initialize → append* → finalize, puis attente du traitement si nécessaire."""
+        total = len(data)
+        init: Dict[str, Any] = {
+            "media_type": mime_type,
+            "total_bytes": total,
+            "media_category": media_category,
+        }
+        if additional_owners:
+            init["additional_owners"] = [
+                x.strip() for x in additional_owners.split(",") if x.strip()
+            ]
+        res = self._media_call("POST", "/upload/initialize", json_body=init)
+        if not res.get("ok"):
+            res["failed_step"] = "initialize"
+            return res
+
+        payload = res.get("data") if isinstance(res.get("data"), dict) else {}
+        inner = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        media_id = str(inner.get("id") or "")
+        if not media_id:
+            return {
+                "ok": False,
+                "error": "initialize n'a pas renvoyé de media_id lisible.",
+                "data": payload,
+            }
+
+        chunk = max(256 * 1024, int(self.valves.MEDIA_CHUNK_BYTES))
+        index = 0
+        for offset in range(0, total, chunk):
+            segment = data[offset : offset + chunk]
+            r = self._media_call(
+                "POST",
+                f"/upload/{media_id}/append",
+                data={"segment_index": str(index)},
+                files={"media": ("segment", segment, "application/octet-stream")},
+            )
+            if not r.get("ok"):
+                r["media_id"] = media_id
+                r["failed_step"] = f"append[{index}]"
+                return r
+            index += 1
+
+        res = self._media_call("POST", f"/upload/{media_id}/finalize")
+        if not res.get("ok"):
+            res["media_id"] = media_id
+            res["failed_step"] = "finalize"
+            return res
+
+        payload = res.get("data") if isinstance(res.get("data"), dict) else {}
+        info = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+
+        # Attente du traitement serveur (fréquent pour les vidéos, rare pour les images).
+        processing = info.get("processing_info")
+        deadline = time.time() + max(0, int(self.valves.MEDIA_PROCESSING_WAIT))
+        while isinstance(processing, dict) and processing.get("state") in (
+            "pending",
+            "in_progress",
+        ):
+            if time.time() >= deadline:
+                break
+            time.sleep(max(1, int(processing.get("check_after_secs") or 1)))
+            st = self._media_call(
+                "GET", "/upload", params={"command": "STATUS", "media_id": media_id}
+            )
+            if not st.get("ok"):
+                st["media_id"] = media_id
+                st["failed_step"] = "status"
+                return st
+            st_payload = st.get("data") if isinstance(st.get("data"), dict) else {}
+            if isinstance(st_payload.get("data"), dict):
+                info = st_payload["data"]
+            processing = info.get("processing_info")
+            if isinstance(processing, dict) and processing.get("state") == "failed":
+                return {
+                    "ok": False,
+                    "error": "Traitement du média échoué côté X.",
+                    "media_id": media_id,
+                    "processing_info": processing,
+                }
+
+        return {
+            "ok": True,
+            "status_code": res.get("status_code"),
+            "data": {"data": info},
+            "media_id": media_id,
+            "upload_mode": "chunked",
+        }
+
+    def upload_media(
+        self,
+        media_source: str,
+        mime_type: Optional[str] = None,
+        media_category: str = "tweet_image",
+        alt_text: Optional[str] = None,
+        additional_owners: Optional[str] = None,
+        confirm: bool = False,
+    ) -> str:
+        """
+        Téléverse un média sur X (POST /2/media/upload) pour l'attacher à un post.
+        Renvoie le media_id à passer dans create_post (media_ids). Sans confirm=true,
+        renvoie seulement un aperçu (type détecté, taille, requête prévue) et ne téléverse rien.
+        :param media_source: Source du média : chemin de fichier local, URL http(s), ou contenu
+        encodé (préfixe 'base64:' ou data URI 'data:<mime>;base64,…').
+        :param mime_type: Type MIME (ex : image/jpeg). Détecté automatiquement depuis les octets si omis.
+        :param media_category: tweet_image, tweet_gif, tweet_video, dm_image, dm_gif ou dm_video (défaut tweet_image).
+        :param alt_text: Texte alternatif accessible, 1000 caractères max (optionnel mais recommandé).
+        :param additional_owners: IDs numériques d'autres comptes autorisés à utiliser le média, séparés par des virgules.
+        :param confirm: Mettre true pour téléverser réellement.
+        """
+        media_category = (media_category or "tweet_image").strip()
+        spec = self.MEDIA_CATEGORIES.get(media_category)
+        if not spec:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": f"media_category inconnu '{media_category}'. "
+                    f"Valeurs acceptées : {', '.join(self.MEDIA_CATEGORIES)}.",
+                }
+            )
+
+        alt = (alt_text or "").strip()
+        if len(alt) > 1000:
+            return self._dump(
+                {"ok": False, "error": "alt_text dépasse 1000 caractères."}
+            )
+
+        owners = [o.strip() for o in (additional_owners or "").split(",") if o.strip()]
+        if any(not o.isdigit() for o in owners):
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": "additional_owners doit contenir des IDs numériques "
+                    "séparés par des virgules.",
+                }
+            )
+        owners_str = ",".join(owners) or None
+
+        explicit = (mime_type or "").strip().lower() or None
+        if explicit:
+            explicit = self.MIME_ALIASES.get(explicit, explicit)
+            if not self.MIME_PATTERN.match(explicit):
+                return self._dump(
+                    {
+                        "ok": False,
+                        "error": f"mime_type invalide '{mime_type}' : attendu un "
+                        "type comme image/jpeg.",
+                    }
+                )
+
+        try:
+            data, hint, source_type = self._resolve_media(media_source)
+        except ValueError as e:
+            return self._dump({"ok": False, "error": str(e)})
+        if not data:
+            return self._dump({"ok": False, "error": "Média vide (0 octet)."})
+
+        sniffed = self._sniff_mime(data, hint)
+        resolved = self.MIME_ALIASES.get(sniffed or explicit or "", sniffed or explicit)
+        if not resolved:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": "Type de média indétectable : précisez mime_type.",
+                }
+            )
+        if resolved not in spec["mimes"]:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": f"{resolved} incompatible avec media_category "
+                    f"'{media_category}' (attendu : {', '.join(spec['mimes'])}).",
+                }
+            )
+        mime_notice = None
+        if explicit and sniffed and explicit != sniffed:
+            mime_notice = (
+                f"mime_type='{explicit}' ignoré : la signature des octets indique "
+                f"'{sniffed}'."
+            )
+
+        size = len(data)
+        if size > spec["max_bytes"]:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": f"Fichier trop volumineux pour {media_category} : "
+                    f"{self._human_size(size)} pour un maximum de "
+                    f"{self._human_size(spec['max_bytes'])}.",
+                }
+            )
+
+        use_chunked = size > 5 * 1024 * 1024 or media_category.endswith(
+            ("_gif", "_video")
+        )
+        chunk = max(256 * 1024, int(self.valves.MEDIA_CHUNK_BYTES))
+        segments = (size + chunk - 1) // chunk if use_chunked else 1
+
+        if not confirm:
+            out: Dict[str, Any] = {
+                "ok": True,
+                "preview": True,
+                "source_type": source_type,
+                "mime_type": resolved,
+                "media_category": media_category,
+                "size_bytes": size,
+                "size_human": self._human_size(size),
+                "alt_text_chars": len(alt),
+                "plan": {
+                    "method": "POST",
+                    "endpoint": f"{self._media_base()}/upload",
+                    "upload_mode": "fragmenté (chunked)" if use_chunked else "simple",
+                    "steps": (
+                        "initialize → append × "
+                        f"{segments} → finalize → status si traitement"
+                        if use_chunked
+                        else "upload (multipart)"
+                    ),
+                    "auth": (
+                        "OAuth 1.0a"
+                        if self._post_auth_mode() == "oauth1"
+                        else "Bearer (OAuth 2.0 user-context)"
+                    ),
+                },
+                "message": "Aperçu seulement. Relancez avec confirm=true pour téléverser.",
+            }
+            if mime_notice:
+                out["notice"] = mime_notice
+            return self._dump(out)
+
+        result = (
+            self._upload_chunked(data, resolved, media_category, owners_str)
+            if use_chunked
+            else self._upload_simple(data, resolved, media_category, owners_str)
+        )
+        if not result.get("ok"):
+            self._media_failure_notice(result)
+            return self._dump(result)
+
+        payload = result.get("data") if isinstance(result.get("data"), dict) else {}
+        inner = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        media_id = str(inner.get("id") or result.get("media_id") or "")
+        if not media_id:
+            return self._dump(
+                {
+                    "ok": False,
+                    "error": "Téléversement accepté mais media_id illisible dans la réponse.",
+                    "data": payload,
+                }
+            )
+
+        out = {
+            "ok": True,
+            "status_code": result.get("status_code"),
+            "media_id": media_id,
+            "media_key": inner.get("media_key"),
+            "upload_mode": result.get("upload_mode")
+            or ("chunked" if use_chunked else "simple"),
+            "mime_type": resolved,
+            "media_category": media_category,
+            "size_bytes": size,
+            "data": payload,
+            "hint": (
+                f"Média prêt (valable environ 24 h). Passez media_ids='{media_id}' à "
+                "create_post, ou appelez set_media_alt_text pour ajouter une description "
+                "accessible avant publication."
+            ),
+        }
+        if inner.get("expires_after_secs") is not None:
+            out["expires_after_secs"] = inner["expires_after_secs"]
+        if mime_notice:
+            out["notice"] = mime_notice
+
+        if alt:
+            meta = self._media_call(
+                "POST",
+                "/metadata",
+                json_body={
+                    "id": media_id,
+                    "metadata": {"alt_text": {"text": alt[:1000]}},
+                },
+            )
+            out["alt_text"] = {
+                "ok": meta.get("ok", False),
+                "status_code": meta.get("status_code"),
+            }
+            if not meta.get("ok"):
+                out["alt_text"]["error"] = (
+                    meta.get("errors") or meta.get("error") or meta.get("data")
+                )
+        return self._dump(out)
+
+    def set_media_alt_text(self, media_id: str, alt_text: str) -> str:
+        """
+        Ajoute ou remplace le texte alternatif (accessible) d'un média déjà téléversé
+        (POST /2/media/metadata). À appeler après upload_media et avant create_post.
+        :param media_id: Identifiant numérique du média (champ media_id de la réponse de upload_media).
+        :param alt_text: Description accessible, 1000 caractères max.
+        """
+        media_id = (media_id or "").strip()
+        if not media_id.isdigit():
+            return self._dump(
+                {"ok": False, "error": "media_id doit être un identifiant numérique."}
+            )
+        alt = (alt_text or "").strip()
+        if not alt:
+            return self._dump({"ok": False, "error": "alt_text est vide."})
+        if len(alt) > 1000:
+            return self._dump(
+                {"ok": False, "error": "alt_text dépasse 1000 caractères."}
+            )
+        result = self._media_call(
+            "POST",
+            "/metadata",
+            json_body={"id": media_id, "metadata": {"alt_text": {"text": alt}}},
+        )
+        self._media_failure_notice(result)
+        return self._dump(result)
+
+    # ------------------------------------------------------------------
+    # Outils publics — flux temps réel
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _find_event_type(event: dict) -> Optional[str]:
+        """Cherche le type d'un événement reçu (racine ou sous l'objet 'data')."""
+        if not isinstance(event, dict):
+            return None
+        for container in (event, event.get("data")):
+            if isinstance(container, dict):
+                for key in ("event_type", "type"):
+                    if isinstance(container.get(key), str):
+                        return container[key]
+        return None
+
+    def _collect_stream(
+        self, duration_seconds: int, max_events: int, event_type: Optional[str]
+    ) -> Dict[str, Any]:
+        """Lit le flux (bloquant) ; un minuteur ferme la connexion à l'échéance exacte."""
+        url = f"{self._base_url()}/stream"
+        events: List[dict] = []
+        skipped = 0
+        started = time.time()
+        deadline = started + duration_seconds
+        timer = None
+        try:
+            with requests.get(
+                url,
+                headers=self._headers(),
+                stream=True,
+                timeout=(10, duration_seconds + 30),
+            ) as resp:
+                if resp.status_code != 200:
+                    out = {
+                        "ok": False,
+                        "status_code": resp.status_code,
+                        "data": resp.text[:2000],
+                    }
+                    hint = self._status_hint(resp.status_code)
+                    if hint:
+                        out["hint"] = hint
+                    return out
+                timer = threading.Timer(duration_seconds, resp.close)
+                timer.daemon = True
+                timer.start()
+                try:
+                    for line in resp.iter_lines(decode_unicode=True):
+                        if time.time() >= deadline:
+                            break
+                        if not line:  # keep-alive
+                            continue
+                        line = line.strip()
+                        if line.startswith("data:"):  # compat SSE
+                            line = line[5:].strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            event = {"raw": line}
+                        if event_type and self._find_event_type(event) != event_type:
+                            skipped += 1
+                            continue
+                        events.append(event)
+                        if len(events) >= max_events:
+                            break
+                except (requests.RequestException, ValueError, OSError):
+                    # Fermeture volontaire à l'échéance ou coupure de lecture : fin normale.
+                    if time.time() < deadline - 1 and not events:
+                        raise
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        except requests.RequestException as e:
+            return {"ok": False, "error": f"Erreur réseau : {e}"}
+        finally:
+            if timer:
+                timer.cancel()
+
+        out = {
+            "ok": True,
+            "event_count": len(events),
+            "duration_seconds": round(time.time() - started, 1),
+            "reached_max_events": len(events) >= max_events,
+            "events": events,
+        }
+        if event_type:
+            out["filtered_out"] = skipped
+        return out
+
+    async def connect_stream(
+        self,
+        duration_seconds: int = 60,
+        max_events: int = 20,
+        event_type: Optional[str] = None,
+        __event_emitter__=None,
+    ) -> str:
+        """
+        Se connecte au flux d'activité persistant (GET /2/activity/stream) et collecte les événements reçus.
+        Ne reçoit que les événements des abonnements créés SANS webhook_id.
+        :param duration_seconds: Durée d'écoute en secondes (1 à la limite des Valves, défaut 60).
+        :param max_events: Nombre maximal d'événements à collecter avant de rendre la main (défaut 20).
+        :param event_type: Filtre optionnel appliqué côté outil : ne garder que ce type d'événement.
+        """
+
+        async def status(description: str, done: bool = False):
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": description, "done": done},
+                    }
+                )
+
+        if event_type:
+            try:
+                self._validate_event_type(event_type)
+            except ValueError as e:
+                return self._dump({"ok": False, "error": str(e)})
+
+        duration_seconds = max(
+            1, min(int(duration_seconds), int(self.valves.MAX_STREAM_SECONDS))
+        )
+        max_events = max(1, min(int(max_events), int(self.valves.MAX_STREAM_EVENTS)))
+
+        await status(f"Écoute du flux X Activity ({duration_seconds} s max)…")
+        result = await asyncio.to_thread(
+            self._collect_stream, duration_seconds, max_events, event_type
+        )
+        if result.get("ok"):
+            await status(
+                f"Flux terminé : {result['event_count']} événement(s) reçu(s).",
+                done=True,
+            )
+        else:
+            await status("Échec de la connexion au flux.", done=True)
+        return self._dump(result)
+
+    # ------------------------------------------------------------------
+    # Helpers standards du template OpenWebUI
+    # ------------------------------------------------------------------
+    def get_user_name_and_email_and_id(self, __user__: dict = {}) -> str:
+        """Get the user name, Email and ID from the user object."""
+        result = ""
+        if "name" in __user__:
+            result += f"User: {__user__['name']}"
+        if "id" in __user__:
+            result += f" (ID: {__user__['id']})"
+        if "email" in __user__:
+            result += f" (Email: {__user__['email']})"
+        return result or "User: Unknown"
+
+    def get_current_time(self) -> str:
+        """Get the current date and time (local and UTC), useful to build expires_at values."""
+        now = datetime.now().astimezone()
+        utc = now.astimezone(timezone.utc)
+        return (
+            f"Local: {now.strftime('%A, %B %d, %Y, %I:%M:%S %p')} | "
+            f"UTC (RFC 3339): {utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
